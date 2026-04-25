@@ -14,14 +14,16 @@ async fn main() -> Result<()> {
 
     loop {
         let (sock, addr) = listener.accept().await?;
-        println!("Conn: {addr}");
-        if let Err(e) = handle_incoming(sock).await {
-            println!("Error: {e}");
-        }
+        tokio::spawn(async move {
+            if let Err(e) = handle_incoming(addr, sock).await {
+                println!("Error: {e}");
+            }
+        });
     }
 }
 
-async fn handle_incoming(mut s: TcpStream) -> Result<()> {
+async fn handle_incoming(addr: std::net::SocketAddr, mut s: TcpStream) -> Result<()> {
+    println!("Conn: {addr}");
     loop {
         if proto::read_stream(&mut s).await?.is_none() {
             break;
