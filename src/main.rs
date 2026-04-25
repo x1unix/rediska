@@ -16,6 +16,10 @@ fn main() {
 
 fn handle_incoming(r: Result<std::net::TcpStream, std::io::Error>) -> Result<()> {
     let mut s = r?;
-    proto::read_stream(&mut s)?;
+    loop {
+        if let None = proto::read_stream(&mut s)? {
+            break;
+        }
+    }
     Ok(())
 }
