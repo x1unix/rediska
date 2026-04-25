@@ -17,7 +17,7 @@ fn main() {
 fn handle_incoming(r: Result<std::net::TcpStream, std::io::Error>) -> Result<()> {
     let mut s = r?;
     loop {
-        if let None = proto::read_stream(&mut s)? {
+        if proto::read_stream(&mut s)?.is_none() {
             break;
         }
     }

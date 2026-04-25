@@ -25,5 +25,5 @@ where
     s.write_all(response.as_bytes())
         .context("can't write response")?;
 
-    Some(())
+    Ok(Some(()))
 }
