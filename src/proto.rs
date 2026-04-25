@@ -2,12 +2,14 @@ use std::net::TcpStream;
 
 use anyhow::{Context, Error, Result, anyhow};
 
+pub enum ValueKind {}
+
 pub fn read_stream<T>(s: &mut T) -> Result<()>
 where
     T: std::io::Read + std::io::Write,
 {
     // TODO: read all
-    let mut buff: [u8; 8] = [0; 8];
+    let mut buff: [u8; 16] = [0; 16];
     let n = s.read(&mut buff[..])?;
     let _req = str::from_utf8(&buff[..n]).context("payload is not a text")?;
     // let response = match req {
