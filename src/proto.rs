@@ -1,16 +1,16 @@
-use std::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use anyhow::{Context, Error, Result, anyhow};
 
 pub enum ValueKind {}
 
-pub fn read_stream<T>(s: &mut T) -> Result<Option<()>>
+pub async fn read_stream<T>(s: &mut T) -> Result<Option<()>>
 where
-    T: std::io::Read + std::io::Write,
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     // TODO: read all
     let mut buff: [u8; 16] = [0; 16];
-    let n = s.read(&mut buff[..])?;
+    let n = s.read(&mut buff[..]).await?;
     if n == 0 {
         return Ok(None);
     }
@@ -23,6 +23,7 @@ where
     let response = "+PONG\r\n";
 
     s.write_all(response.as_bytes())
+        .await
         .context("can't write response")?;
 
     Ok(Some(()))

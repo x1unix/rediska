@@ -1,23 +1,29 @@
 #![allow(unused_imports)]
 use anyhow::Result;
-use std::net::TcpListener;
+// use std::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 pub mod proto;
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+const ADDR: &str = "127.0.0.1:6379";
 
-    for stream in listener.incoming() {
-        if let Err(err) = handle_incoming(stream) {
-            println!("error: {}", err);
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    let listener = TcpListener::bind(ADDR).await?;
+    println!("Listening on {ADDR}");
+
+    loop {
+        let (sock, addr) = listener.accept().await?;
+        println!("Conn: {addr}");
+        if let Err(e) = handle_incoming(sock).await {
+            println!("Error: {e}");
         }
     }
 }
 
-fn handle_incoming(r: Result<std::net::TcpStream, std::io::Error>) -> Result<()> {
-    let mut s = r?;
+async fn handle_incoming(mut s: TcpStream) -> Result<()> {
     loop {
-        if proto::read_stream(&mut s)?.is_none() {
+        if proto::read_stream(&mut s).await?.is_none() {
             break;
         }
     }
