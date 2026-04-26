@@ -1,17 +1,9 @@
-use std::usize;
-
-use bytes::BytesMut;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use anyhow::{Context, Result, anyhow};
 
-pub enum Value {
-    Array(Vec<Value>),
-    BulkString(String),
-}
-
-pub async fn read_stream<T>(s: &mut T) -> Result<Option<Value>>
+pub async fn read_stream<T>(s: &mut T) -> Result<Option<()>>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -39,70 +31,145 @@ where
     Ok(None)
 }
 
-enum FrameKind {
-    Array { len: u32 },
-    BulkString { len: u32 },
+#[derive(Debug)]
+pub enum FrameKind {
+    Array { len: u64, width: usize },
+    BulkString { len: u64, width: usize },
     NullBulkString,
     Delimiter,
-    Literal,
+}
+
+impl FrameKind {
+    /// Returns frame size in bytes
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Delimiter => 2,
+            Self::NullBulkString => 3,
+            Self::BulkString { width, .. } => *width,
+            Self::Array { width, .. } => *width,
+        }
+    }
 }
 
 #[derive(Debug)]
-struct BufRef(usize, usize);
+pub struct BufRef(usize, usize);
 
 impl BufRef {
-    fn offset(&self) -> usize {
+    pub fn new(offset: usize, len: usize) -> BufRef {
+        BufRef(offset, len)
+    }
+
+    pub fn offset(&self) -> usize {
         self.0
     }
 
-    fn len(&self) -> usize {
+    pub fn is_empty(&self) -> bool {
+        self.1 == 0
+    }
+
+    pub fn len(&self) -> usize {
         self.1
+    }
+
+    pub fn with_offset(&self, offset: usize) -> Self {
+        BufRef(offset + self.0, self.1)
     }
 }
 
 #[derive(Debug, Error)]
-enum ParseError {
-    #[error("end of buffer")]
-    EOF,
+pub enum ParseError {
+    #[error("incomplete buffer")]
+    Incomplete,
 
-    #[error("end of buffer")]
+    #[error("io error")]
+    Io(#[from] std::io::Error),
+
+    #[error("bad frame")]
     BadFrame(BufRef),
 
     #[error("invalid length value")]
     BadLength(BufRef),
+
+    #[error("unexpected frame")]
+    UnexpectedFrame { offset: usize, frame: FrameKind },
+
+    #[error("unknown frame")]
+    UnknownFrame { offset: usize, val: u8 },
 }
 
-fn parse_frame(src: &[u8]) -> Result<(FrameKind, usize), ParseError> {
-    if src.is_empty() {
-        return Err(ParseError::EOF);
-    }
-
-    return match src[0] {
-        b'\r' => match src.get(1) {
-            None => Err(ParseError::EOF),
-            Some(v) if *v == b'\n' => Ok((FrameKind::Delimiter, 2)),
-            _ => Err(ParseError::BadFrame(BufRef(0, 2))),
-        },
-        b'*' => {
-            todo!()
+impl ParseError {
+    /// with_offset adds base offset to error positions.
+    pub fn with_offset(self, addr: usize) -> ParseError {
+        match self {
+            Self::BadFrame(r) => Self::BadFrame(r.with_offset(addr)),
+            Self::BadLength(r) => Self::BadLength(r.with_offset(addr)),
+            Self::UnexpectedFrame { offset, frame } => Self::UnexpectedFrame {
+                offset: offset + addr,
+                frame,
+            },
+            Self::UnknownFrame { offset, val } => Self::UnknownFrame {
+                offset: offset + addr,
+                val,
+            },
+            _ => self,
         }
-        _ => todo!(),
+    }
+}
+
+pub enum ValueRef {
+    Array { len: u64 },
+    String(BufRef),
+    // TODO: add remaining types
+}
+
+pub fn parse_frame(src: &[u8], offset: usize) -> Result<Option<(FrameKind, usize)>, ParseError> {
+    let ch = match src.get(offset) {
+        Some(ch) => ch,
+        None => return Ok(None),
     };
 
-    todo!()
+    match *ch {
+        b'\r' => match src.get(offset + 1) {
+            None => Err(ParseError::Incomplete),
+            Some(b'\n') => Ok(Some((FrameKind::Delimiter, 2))),
+            _ => Err(ParseError::BadFrame(BufRef(offset, 1))),
+        },
+        b'*' => {
+            // TODO: maybe support null arrays (*-1)?
+            let (len, next) = read_uint(src, offset + 1)?;
+            let width = next - offset; // Size of "*<digits...>" segment w/o CRLF
+            Ok(Some((FrameKind::Array { len, width }, next)))
+        }
+        b'$' => {
+            let (len, next) = read_int(src, offset + 1, true)?;
+            match len {
+                -1 => Ok(Some((FrameKind::NullBulkString, next))),
+                x if x > 0 => Ok(Some((
+                    FrameKind::BulkString {
+                        len: x as u64,
+                        width: next - offset, // Size of "$<digits...>" segment w/o CRLF
+                    },
+                    next,
+                ))),
+                _ => Err(ParseError::BadLength(BufRef(offset, next))),
+            }
+        }
+        _ => Err(ParseError::UnknownFrame { offset, val: *ch }),
+    }
 }
 
-enum LookupResult<T> {
-    Ok(T),
-    None,
-    EOF,
+pub fn read_uint(src: &[u8], offset: usize) -> Result<(u64, usize), ParseError> {
+    let (val, next) = read_int(src, offset, false)?;
+    u64::try_from(val)
+        .map(|v| (v, next))
+        .map_err(|_| ParseError::BadLength(BufRef(offset, next)))
 }
 
 /// Reads a given buffer from offset and reads an integer value till carriage return character (\n).
 /// Returns read value and offset after a numeric string.
-fn read_num(src: &[u8], offset: usize) -> Result<(i64, usize), ParseError> {
+pub fn read_int(src: &[u8], offset: usize, signed: bool) -> Result<(i64, usize), ParseError> {
     let is_neg = match src.get(offset) {
-        None => return Err(ParseError::EOF),
+        None => return Err(ParseError::Incomplete),
         Some(b'-') => true,
         _ => false,
     };
@@ -114,7 +181,7 @@ fn read_num(src: &[u8], offset: usize) -> Result<(i64, usize), ParseError> {
         match src.get(i) {
             Some(b'\r') => {
                 // End of frame
-                return if is_empty {
+                return if is_empty || !signed {
                     Err(ParseError::BadLength(BufRef(offset, i - offset)))
                 } else {
                     Ok((acc, i))
@@ -136,21 +203,42 @@ fn read_num(src: &[u8], offset: usize) -> Result<(i64, usize), ParseError> {
                 i += 1;
             }
             Some(_) => return Err(ParseError::BadLength(BufRef(offset, i - offset))),
-            None => return Err(ParseError::EOF),
+            None => return Err(ParseError::Incomplete),
         }
     }
 
     // need more data to read till delimiter
-    Err(ParseError::EOF)
+    Err(ParseError::Incomplete)
 }
 
-fn seek_eol(src: &[u8], offset: usize) -> LookupResult<usize> {
+pub struct WordRef {
+    pub offset: usize,
+
+    /// Number of bytes before EOL
+    pub len: usize,
+
+    // Next offset
+    pub end: usize,
+}
+
+pub fn read_word(src: &[u8], offset: usize) -> Result<Option<WordRef>, ParseError> {
     // NOTE: redis-cli split strings into separate frames only by "\n". "foo\rbar" is single frame.
-    match (src.get(offset), src.get(offset + 1)) {
-        (Some(b'\r'), Some(b'\n')) => LookupResult::Ok(offset + 2),
-        (_, None) => LookupResult::EOF,
-        _ => LookupResult::None,
+    let mut i = offset;
+    while i < src.len() {
+        match (src[i], src.get(i + 1)) {
+            (b'\r', Some(b'\n')) => {
+                return Ok(Some(WordRef {
+                    offset,
+                    len: i - offset,
+                    end: i + 2,
+                }));
+            }
+            (_, None) => return Err(ParseError::Incomplete),
+            _ => i += 1,
+        }
     }
+
+    Err(ParseError::Incomplete)
 }
 
 // async fn read_frame<T>(src: &mut T, buff: &mut BytesMut) -> Result<Option<ReadResult>>
