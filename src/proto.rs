@@ -71,6 +71,10 @@ impl BufRef {
         self.1
     }
 
+    pub fn end(&self) -> usize {
+        self.0 + self.1
+    }
+
     pub fn with_offset(&self, offset: usize) -> Self {
         BufRef(offset + self.0, self.1)
     }
@@ -211,34 +215,18 @@ pub fn read_int(src: &[u8], offset: usize, signed: bool) -> Result<(i64, usize),
     Err(ParseError::Incomplete)
 }
 
-pub struct WordRef {
-    pub offset: usize,
-
-    /// Number of bytes before EOL
-    pub len: usize,
-
-    // Next offset
-    pub end: usize,
-}
-
-pub fn read_word(src: &[u8], offset: usize) -> Result<Option<WordRef>, ParseError> {
+/// Validates the bulk string frame and returns its ref on success.
+pub fn check_word(src: &[u8], offset: usize, len: usize) -> Result<BufRef, ParseError> {
     // NOTE: redis-cli split strings into separate frames only by "\n". "foo\rbar" is single frame.
-    let mut i = offset;
-    while i < src.len() {
-        match (src[i], src.get(i + 1)) {
-            (b'\r', Some(b'\n')) => {
-                return Ok(Some(WordRef {
-                    offset,
-                    len: i - offset,
-                    end: i + 2,
-                }));
-            }
-            (_, None) => return Err(ParseError::Incomplete),
-            _ => i += 1,
+    let cr = offset + len;
+    let lf = cr + 1;
+    match (src.get(cr), src.get(lf)) {
+        (Some(b'\r'), Some(b'\n')) => {
+            return Ok(BufRef::new(offset, len));
         }
+        (_, None) => return Err(ParseError::Incomplete),
+        _ => Err(ParseError::BadFrame(BufRef::new(offset, len))),
     }
-
-    Err(ParseError::Incomplete)
 }
 
 // async fn read_frame<T>(src: &mut T, buff: &mut BytesMut) -> Result<Option<ReadResult>>

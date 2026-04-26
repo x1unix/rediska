@@ -1,8 +1,13 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::proto::{BufRef, FrameKind, ParseError, WordRef, parse_frame, read_word};
+use crate::proto::{BufRef, FrameKind, ParseError, check_word, parse_frame};
+
+enum Value {
+    String(Bytes),
+    Array(Vec<Value>),
+}
 
 enum ValueRef {
     Array { len: u64 },
@@ -15,8 +20,29 @@ pub struct StreamParser<T: AsyncRead + Unpin> {
     reader: T,
     buf: BytesMut,
     pos: usize,
-    consumed_bytes: usize,
+    total_bytes: usize, // global offset
     refs: Vec<ValueRef>,
+}
+
+enum Container {
+    Array {
+        remaining: usize,
+        items: Vec<Value>,
+    },
+    Map {
+        remaining: usize,
+        entries: Vec<(Value, Value)>,
+        pending_key: Option<Value>,
+    },
+}
+
+impl Container {
+    pub fn new_array(count: u64) -> Self {
+        return Self::Array {
+            remaining: count as usize,
+            items: Vec::with_capacity(count as usize),
+        };
+    }
 }
 
 impl<T> StreamParser<T>
@@ -29,50 +55,123 @@ where
             buf: BytesMut::with_capacity(buff_size),
             refs: Vec::with_capacity(4),
             pos: 0,
-            consumed_bytes: 0,
+            total_bytes: 0,
         }
     }
 
-    pub async fn parse(&mut self) -> Result<Option<()>, ParseError> {
-        // Two stage parser.
-        // Stage 1: consume reader into a buffer + parse frames into a flat ref tree.
-        // Stage 2: freeze the buff and build a tree with dereferenced values.
+    fn split_buf(&mut self) -> Bytes {
+        let b = self.buf.split_to(self.pos).freeze();
+        self.total_bytes += self.pos;
+        self.pos = 0;
+        b
+    }
 
-        let mut segments: Vec<ValueRef> = Vec::with_capacity(5);
-        while let Some(seg) = self.frame_with_eol().await? {
-            match seg {
-                FrameKind::Array { len, .. } => segments.push(ValueRef::Array { len }),
-                FrameKind::BulkString { len, .. } => {
-                    // TODO: read string after it
-                    segments.push(ValueRef::String(BufRef::new(self.pos, 0)));
-                }
-                _ => {
-                    return Err(ParseError::UnexpectedFrame {
-                        offset: self.pos - seg.byte_len(),
-                        frame: seg,
-                    });
-                }
+    pub async fn parse(&mut self) -> Result<Option<Value>, ParseError> {
+        let Some(root) = self.frame_with_eol().await? else {
+            return Ok(None);
+        };
+
+        let mut stack: Vec<Container> = Vec::new();
+        match root {
+            FrameKind::BulkString { len, .. } => {
+                let w = self.read_word(len as usize).await?;
+                let raw = self.split_buf();
+                let data = raw.slice(w.offset()..w.end());
+                return Ok(Some(Value::String(data)));
             }
+            FrameKind::Array { len, .. } => {
+                stack.push(Container::new_array(len));
+            }
+            _ => {
+                return Err(ParseError::UnexpectedFrame {
+                    offset: self.pos - root.byte_len(),
+                    frame: root,
+                });
+            }
+        }
+
+        while stack.len() > 0 {
+            let tail = stack.last_mut()
         }
 
         todo!()
     }
 
-    async fn read_word(&mut self) -> Result<WordRef, ParseError> {
+    // pub async fn parse(&mut self) -> Result<Option<Value>, ParseError> {
+    //     let Some(root) = self.frame_with_eol().await? else {
+    //         return Ok(None);
+    //     };
+    //
+    //     match root {
+    //         FrameKind::BulkString { len, .. } => {
+    //             let w = self.read_word(len as usize).await?;
+    //             let raw = self.split_buf();
+    //             let data = raw.slice(w.offset()..w.end());
+    //             return Ok(Some(Value::String(data)));
+    //         }
+    //         FrameKind::Array { len, .. } => {
+    //             // Discard behind
+    //             self.split_buf();
+    //
+    //             // Collect all frames
+    //             self.read_array(len as usize).await?;
+    //             // segments.push(ValueRef::Array { len });
+    //         }
+    //         _ => {
+    //             return Err(ParseError::UnexpectedFrame {
+    //                 offset: self.pos - root.byte_len(),
+    //                 frame: root,
+    //             });
+    //         }
+    //     }
+    //     todo!()
+    // }
+    //
+    // async fn read_array(&mut self, count: usize) -> Result<(), ParseError> {
+    //     // TODO: support other types
+    //     let mut stack: Vec<Container> = vec![Container::new_array(count)];
+    //     // let mut acc: Vec<ValueRef> = Vec::with_capacity((count + 1) as usize);
+    //     // acc.push(ValueRef::Array { len: count });
+    //
+    //     // while stack.len() > 0 {
+    //     //
+    //     // }
+    //     let current = Container::new_array(count);
+    //     for _ in 0..count {
+    //         let frame = self.frame_with_eol().await?.ok_or(ParseError::Incomplete)?;
+    //         match frame {
+    //             FrameKind::Array { len, .. } => {
+    //                 stack.push(value);
+    //                 acc.push(ValueRef::Array { len });
+    //             }
+    //             FrameKind::BulkString { len, .. } => {
+    //                 acc.push(ValueRef::String(BufRef::new(self.pos, len as usize)));
+    //             }
+    //             _ => {
+    //                 todo!()
+    //             }
+    //         }
+    //     }
+    //
+    //     let raw = self.split_buf();
+    //
+    //     todo!()
+    // }
+
+    async fn read_word(&mut self, len: usize) -> Result<BufRef, ParseError> {
         loop {
-            match read_word(&self.buf, self.pos) {
-                Ok(Some(word)) => {
-                    self.pos = word.end;
+            match check_word(&self.buf, self.pos, len) {
+                Ok(word) => {
+                    self.pos += len + 2;
                     return Ok(word);
                 }
-                Ok(None) => return Err(ParseError::Incomplete),
                 Err(ParseError::Incomplete) => {
                     let n = self.reader.read_buf(&mut self.buf).await?;
                     if n == 0 {
                         return Err(ParseError::Incomplete);
                     }
                 }
-                Err(e) => return Err(e),
+                Err(err) => return Err(err),
             }
         }
     }
