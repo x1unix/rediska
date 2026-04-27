@@ -108,7 +108,7 @@ pub fn parse_frame(src: &[u8], offset: usize) -> Result<Option<(FrameKind, usize
     match *ch {
         b'\r' => match src.get(offset + 1) {
             None => Err(ParseError::IncompleteBuffer),
-            Some(b'\n') => Ok(Some((FrameKind::Delimiter, 2))),
+            Some(b'\n') => Ok(Some((FrameKind::Delimiter, offset + 2))),
             _ => Err(ParseError::BadFrame(BufRef(offset, 1))),
         },
         b'*' => {
