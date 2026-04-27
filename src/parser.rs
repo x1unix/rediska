@@ -1,36 +1,6 @@
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use anyhow::{Context, anyhow};
-
-pub async fn read_stream<T>(s: &mut T) -> anyhow::Result<Option<()>>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    // TODO: read all
-    // let mut buff: [u8; 4] = [0; 4];
-    let mut buff: [u8; 32] = [0; 32];
-    let n = s.read(&mut buff[..]).await?;
-    if n == 0 {
-        return Ok(None);
-    }
-
-    let req = str::from_utf8(&buff[..n]).context("payload is not a text")?;
-    println!("Req: {:?}", req);
-    // let response = match req {
-    //     "PING" => "+PONG\r\n",
-    //     _ => return Err(anyhow!("invalid cmd: {}", req)),
-    // };
-    let response = "+PONG\r\n";
-
-    s.write_all(response.as_bytes())
-        .await
-        .context("can't write response")?;
-
-    // Ok(Some(()))
-    Ok(None)
-}
-
 #[derive(Debug)]
 pub enum FrameKind {
     Array { len: u64, width: usize },
@@ -220,28 +190,8 @@ pub fn check_word(src: &[u8], offset: usize, len: usize) -> Result<BufRef, Parse
     let cr = offset + len;
     let lf = cr + 1;
     match (src.get(cr), src.get(lf)) {
-        (Some(b'\r'), Some(b'\n')) => {
-            return Ok(BufRef::new(offset, len));
-        }
-        (_, None) => return Err(ParseError::IncompleteBuffer),
+        (Some(b'\r'), Some(b'\n')) => Ok(BufRef::new(offset, len)),
+        (_, None) => Err(ParseError::IncompleteBuffer),
         _ => Err(ParseError::BadFrame(BufRef::new(offset, len))),
     }
 }
-
-// async fn read_frame<T>(src: &mut T, buff: &mut BytesMut) -> Result<Option<ReadResult>>
-// where
-//     T: AsyncRead + AsyncWrite + Unpin,
-// {
-//     let n = src.read(buff).await?;
-//     if n == 0 {
-//         return Ok(None);
-//     }
-//
-//     let segment = &buff[..n];
-//
-//     for ch in segment {
-//         todo!();
-//     }
-//
-//     todo!()
-// }

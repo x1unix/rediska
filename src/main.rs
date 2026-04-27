@@ -24,3 +24,32 @@ async fn main() -> Result<()> {
         });
     }
 }
+
+// pub async fn read_stream<T>(s: &mut T) -> anyhow::Result<Option<()>>
+// where
+//     T: AsyncRead + AsyncWrite + Unpin,
+// {
+//     // TODO: read all
+//     // let mut buff: [u8; 4] = [0; 4];
+//     let mut buff: [u8; 32] = [0; 32];
+//     let n = s.read(&mut buff[..]).await?;
+//     if n == 0 {
+//         return Ok(None);
+//     }
+//
+//     let req = str::from_utf8(&buff[..n]).context("payload is not a text")?;
+//     println!("Req: {:?}", req);
+//     // let response = match req {
+//     //     "PING" => "+PONG\r\n",
+//     //     _ => return Err(anyhow!("invalid cmd: {}", req)),
+//     // };
+//     let response = "+PONG\r\n";
+//
+//     s.write_all(response.as_bytes())
+//         .await
+//         .context("can't write response")?;
+//
+//     // Ok(Some(()))
+//     Ok(None)
+// }
+//
