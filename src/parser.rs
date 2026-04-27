@@ -1,246 +1,247 @@
-use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::proto::{BufRef, FrameKind, ParseError, check_word, parse_frame};
+use anyhow::{Context, Result, anyhow};
 
-enum Value {
-    String(Bytes),
-    Array(Vec<Value>),
+pub async fn read_stream<T>(s: &mut T) -> Result<Option<()>>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    // TODO: read all
+    // let mut buff: [u8; 4] = [0; 4];
+    let mut buff: [u8; 32] = [0; 32];
+    let n = s.read(&mut buff[..]).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+
+    let req = str::from_utf8(&buff[..n]).context("payload is not a text")?;
+    println!("Req: {:?}", req);
+    // let response = match req {
+    //     "PING" => "+PONG\r\n",
+    //     _ => return Err(anyhow!("invalid cmd: {}", req)),
+    // };
+    let response = "+PONG\r\n";
+
+    s.write_all(response.as_bytes())
+        .await
+        .context("can't write response")?;
+
+    // Ok(Some(()))
+    Ok(None)
 }
 
-enum ValueRef {
+#[derive(Debug)]
+pub enum FrameKind {
+    Array { len: u64, width: usize },
+    BulkString { len: u64, width: usize },
+    NullBulkString,
+    Delimiter,
+}
+
+impl FrameKind {
+    /// Returns frame size in bytes
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Delimiter => 2,
+            Self::NullBulkString => 3,
+            Self::BulkString { width, .. } => *width,
+            Self::Array { width, .. } => *width,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BufRef(usize, usize);
+
+impl BufRef {
+    pub fn new(offset: usize, len: usize) -> BufRef {
+        BufRef(offset, len)
+    }
+
+    pub fn offset(&self) -> usize {
+        self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.1 == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.1
+    }
+
+    pub fn end(&self) -> usize {
+        self.0 + self.1
+    }
+
+    pub fn with_offset(&self, offset: usize) -> Self {
+        BufRef(offset + self.0, self.1)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ParseError {
+    #[error("incomplete buffer")]
+    IncompleteBuffer,
+
+    #[error("bad frame")]
+    BadFrame(BufRef),
+
+    #[error("invalid length value")]
+    BadLength(BufRef),
+
+    #[error("unexpected frame")]
+    UnexpectedFrame { offset: usize, frame: FrameKind },
+
+    #[error("unknown frame")]
+    UnknownFrame { offset: usize, val: u8 },
+}
+
+impl ParseError {
+    /// with_offset adds base offset to error positions.
+    pub fn with_offset(self, addr: usize) -> ParseError {
+        match self {
+            Self::BadFrame(r) => Self::BadFrame(r.with_offset(addr)),
+            Self::BadLength(r) => Self::BadLength(r.with_offset(addr)),
+            Self::UnexpectedFrame { offset, frame } => Self::UnexpectedFrame {
+                offset: offset + addr,
+                frame,
+            },
+            Self::UnknownFrame { offset, val } => Self::UnknownFrame {
+                offset: offset + addr,
+                val,
+            },
+            _ => self,
+        }
+    }
+}
+
+pub enum ValueRef {
     Array { len: u64 },
     String(BufRef),
-    Empty,
-    Nil,
+    // TODO: add remaining types
 }
 
-pub struct StreamParser<T: AsyncRead + Unpin> {
-    reader: T,
-    buf: BytesMut,
-    pos: usize,
-    total_bytes: usize, // global offset
-    refs: Vec<ValueRef>,
+pub fn parse_frame(src: &[u8], offset: usize) -> Result<Option<(FrameKind, usize)>, ParseError> {
+    let ch = match src.get(offset) {
+        Some(ch) => ch,
+        None => return Ok(None),
+    };
+
+    // TODO: support all frame types
+    // https://redis.io/docs/latest/develop/reference/protocol-spec/#resp-protocol-description
+    match *ch {
+        b'\r' => match src.get(offset + 1) {
+            None => Err(ParseError::IncompleteBuffer),
+            Some(b'\n') => Ok(Some((FrameKind::Delimiter, 2))),
+            _ => Err(ParseError::BadFrame(BufRef(offset, 1))),
+        },
+        b'*' => {
+            // TODO: maybe support null arrays (*-1)?
+            let (len, next) = read_uint(src, offset + 1)?;
+            let width = next - offset; // Size of "*<digits...>" segment w/o CRLF
+            Ok(Some((FrameKind::Array { len, width }, next)))
+        }
+        b'$' => {
+            let (len, next) = read_int(src, offset + 1, true)?;
+            match len {
+                -1 => Ok(Some((FrameKind::NullBulkString, next))),
+                x if x > 0 => Ok(Some((
+                    FrameKind::BulkString {
+                        len: x as u64,
+                        width: next - offset, // Size of "$<digits...>" segment w/o CRLF
+                    },
+                    next,
+                ))),
+                _ => Err(ParseError::BadLength(BufRef(offset, next))),
+            }
+        }
+        _ => Err(ParseError::UnknownFrame { offset, val: *ch }),
+    }
 }
 
-enum Container {
-    Array {
-        remaining: usize,
-        items: Vec<Value>,
-    },
-    Map {
-        remaining: usize,
-        entries: Vec<(Value, Value)>,
-        pending_key: Option<Value>,
-    },
+pub fn read_uint(src: &[u8], offset: usize) -> Result<(u64, usize), ParseError> {
+    let (val, next) = read_int(src, offset, false)?;
+    u64::try_from(val)
+        .map(|v| (v, next))
+        .map_err(|_| ParseError::BadLength(BufRef(offset, next)))
 }
 
-impl Container {
-    pub fn new_array(count: u64) -> Self {
-        return Self::Array {
-            remaining: count as usize,
-            items: Vec::with_capacity(count as usize),
-        };
+/// Reads a given buffer from offset and reads an integer value till carriage return character (\n).
+/// Returns read value and offset after a numeric string.
+pub fn read_int(src: &[u8], offset: usize, signed: bool) -> Result<(i64, usize), ParseError> {
+    let is_neg = match src.get(offset) {
+        None => return Err(ParseError::IncompleteBuffer),
+        Some(b'-') => true,
+        _ => false,
+    };
+
+    let mut is_empty = true;
+    let mut acc: i64 = 0;
+    let mut i = if is_neg { offset + 1 } else { offset };
+    while i < src.len() {
+        match src.get(i) {
+            Some(b'\r') => {
+                // End of frame
+                return if is_empty || !signed {
+                    Err(ParseError::BadLength(BufRef(offset, i - offset)))
+                } else {
+                    Ok((acc, i))
+                };
+            }
+            Some(v @ b'0'..=b'9') => {
+                is_empty = false;
+                let d = (v - b'0') as i64;
+                acc = acc
+                    .checked_mul(10)
+                    .and_then(|v| {
+                        if is_neg {
+                            v.checked_sub(d)
+                        } else {
+                            v.checked_add(d)
+                        }
+                    })
+                    .ok_or(ParseError::BadLength(BufRef(offset, i - offset)))?;
+                i += 1;
+            }
+            Some(_) => return Err(ParseError::BadLength(BufRef(offset, i - offset))),
+            None => return Err(ParseError::IncompleteBuffer),
+        }
+    }
+
+    // need more data to read till delimiter
+    Err(ParseError::IncompleteBuffer)
+}
+
+/// Validates the bulk string frame and returns its ref on success.
+pub fn check_word(src: &[u8], offset: usize, len: usize) -> Result<BufRef, ParseError> {
+    // NOTE: redis-cli split strings into separate frames only by "\n". "foo\rbar" is single frame.
+    let cr = offset + len;
+    let lf = cr + 1;
+    match (src.get(cr), src.get(lf)) {
+        (Some(b'\r'), Some(b'\n')) => {
+            return Ok(BufRef::new(offset, len));
+        }
+        (_, None) => return Err(ParseError::IncompleteBuffer),
+        _ => Err(ParseError::BadFrame(BufRef::new(offset, len))),
     }
 }
 
-impl<T> StreamParser<T>
-where
-    T: AsyncRead + Unpin,
-{
-    pub fn new(src: T, buff_size: usize) -> Self {
-        Self {
-            reader: src,
-            buf: BytesMut::with_capacity(buff_size),
-            refs: Vec::with_capacity(4),
-            pos: 0,
-            total_bytes: 0,
-        }
-    }
-
-    fn split_buf(&mut self) -> Bytes {
-        let b = self.buf.split_to(self.pos).freeze();
-        self.total_bytes += self.pos;
-        self.pos = 0;
-        b
-    }
-
-    pub async fn parse(&mut self) -> Result<Option<Value>, ParseError> {
-        let Some(root) = self.frame_with_eol().await? else {
-            return Ok(None);
-        };
-
-        let mut stack: Vec<Container> = Vec::new();
-        match root {
-            FrameKind::BulkString { len, .. } => {
-                let w = self.read_word(len as usize).await?;
-                let raw = self.split_buf();
-                let data = raw.slice(w.offset()..w.end());
-                return Ok(Some(Value::String(data)));
-            }
-            FrameKind::Array { len, .. } => {
-                stack.push(Container::new_array(len));
-            }
-            _ => {
-                return Err(ParseError::UnexpectedFrame {
-                    offset: self.pos - root.byte_len(),
-                    frame: root,
-                });
-            }
-        }
-
-        while stack.len() > 0 {
-            let tail = stack.last_mut()
-        }
-
-        todo!()
-    }
-
-    // pub async fn parse(&mut self) -> Result<Option<Value>, ParseError> {
-    //     let Some(root) = self.frame_with_eol().await? else {
-    //         return Ok(None);
-    //     };
-    //
-    //     match root {
-    //         FrameKind::BulkString { len, .. } => {
-    //             let w = self.read_word(len as usize).await?;
-    //             let raw = self.split_buf();
-    //             let data = raw.slice(w.offset()..w.end());
-    //             return Ok(Some(Value::String(data)));
-    //         }
-    //         FrameKind::Array { len, .. } => {
-    //             // Discard behind
-    //             self.split_buf();
-    //
-    //             // Collect all frames
-    //             self.read_array(len as usize).await?;
-    //             // segments.push(ValueRef::Array { len });
-    //         }
-    //         _ => {
-    //             return Err(ParseError::UnexpectedFrame {
-    //                 offset: self.pos - root.byte_len(),
-    //                 frame: root,
-    //             });
-    //         }
-    //     }
-    //     todo!()
-    // }
-    //
-    // async fn read_array(&mut self, count: usize) -> Result<(), ParseError> {
-    //     // TODO: support other types
-    //     let mut stack: Vec<Container> = vec![Container::new_array(count)];
-    //     // let mut acc: Vec<ValueRef> = Vec::with_capacity((count + 1) as usize);
-    //     // acc.push(ValueRef::Array { len: count });
-    //
-    //     // while stack.len() > 0 {
-    //     //
-    //     // }
-    //     let current = Container::new_array(count);
-    //     for _ in 0..count {
-    //         let frame = self.frame_with_eol().await?.ok_or(ParseError::Incomplete)?;
-    //         match frame {
-    //             FrameKind::Array { len, .. } => {
-    //                 stack.push(value);
-    //                 acc.push(ValueRef::Array { len });
-    //             }
-    //             FrameKind::BulkString { len, .. } => {
-    //                 acc.push(ValueRef::String(BufRef::new(self.pos, len as usize)));
-    //             }
-    //             _ => {
-    //                 todo!()
-    //             }
-    //         }
-    //     }
-    //
-    //     let raw = self.split_buf();
-    //
-    //     todo!()
-    // }
-
-    async fn read_word(&mut self, len: usize) -> Result<BufRef, ParseError> {
-        loop {
-            match check_word(&self.buf, self.pos, len) {
-                Ok(word) => {
-                    self.pos += len + 2;
-                    return Ok(word);
-                }
-                Err(ParseError::Incomplete) => {
-                    let n = self.reader.read_buf(&mut self.buf).await?;
-                    if n == 0 {
-                        return Err(ParseError::Incomplete);
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-
-    // async fn read_ref(&mut self) -> Result<Option<ValueRef>, ParseError> {
-    //     let Some(f) = self.frame_with_eol().await? else {
-    //         return Ok(None);
-    //     };
-    //
-    //     match f {
-    //         FrameKind::Array { len, .. } => {
-    //             for _ in 0..len {
-    //                 let elem = self.read_ref().await?.ok_or(ParseError::Incomplete);
-    //             }
-    //         }
-    //         _ => todo!(),
-    //     }
-    //     todo!()
-    // }
-
-    /// Reads the next frame + consumes EOL followed by the frame.
-    async fn frame_with_eol(&mut self) -> Result<Option<FrameKind>, ParseError> {
-        let f = match self.next_frame().await? {
-            Some(FrameKind::Delimiter) => {
-                return Err(ParseError::UnexpectedFrame {
-                    offset: self.pos,
-                    frame: FrameKind::Delimiter,
-                });
-            }
-            Some(f) => f,
-            None => return Ok(None),
-        };
-
-        self.consume_eol().await?;
-        Ok(Some(f))
-    }
-
-    async fn consume_eol(&mut self) -> Result<(), ParseError> {
-        let offset = self.pos;
-        match self.next_frame().await? {
-            None => Err(ParseError::Incomplete),
-            Some(FrameKind::Delimiter) => Ok(()),
-            Some(f) => Err(ParseError::UnexpectedFrame { offset, frame: f }),
-        }
-    }
-
-    async fn next_frame(&mut self) -> Result<Option<FrameKind>, ParseError> {
-        loop {
-            match parse_frame(&self.buf, self.pos) {
-                Ok(Some((frame, next))) => {
-                    self.pos = next;
-                    return Ok(Some(frame));
-                }
-                Ok(None) => {
-                    // Fill buffer and retry
-                    let n = self.reader.read_buf(&mut self.buf).await?;
-                    if n == 0 {
-                        return Ok(None);
-                    }
-                }
-                Err(ParseError::Incomplete) => {
-                    // Incomplete, ask more bytes
-                    let n = self.reader.read_buf(&mut self.buf).await?;
-                    if n == 0 {
-                        return Err(ParseError::Incomplete);
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
+// async fn read_frame<T>(src: &mut T, buff: &mut BytesMut) -> Result<Option<ReadResult>>
+// where
+//     T: AsyncRead + AsyncWrite + Unpin,
+// {
+//     let n = src.read(buff).await?;
+//     if n == 0 {
+//         return Ok(None);
+//     }
+//
+//     let segment = &buff[..n];
+//
+//     for ch in segment {
+//         todo!();
+//     }
+//
+//     todo!()
+// }

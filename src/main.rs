@@ -3,8 +3,9 @@ use anyhow::Result;
 // use std::net::TcpListener;
 use tokio::net::{TcpListener, TcpStream};
 
+pub mod assembler;
 pub mod parser;
-pub mod proto;
+pub mod reader;
 
 const ADDR: &str = "127.0.0.1:6379";
 
