@@ -10,13 +10,30 @@ use tokio::sync::Mutex;
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError};
 
+struct Entry {
+    value: Bytes,
+    ttl: u64,
+}
+
 pub struct Storage {
-    kv: HashMap<Bytes, Bytes>,
+    kv: HashMap<Bytes, Entry>,
 }
 
 impl Storage {
     pub fn new() -> Self {
         Self { kv: HashMap::new() }
+    }
+
+    pub fn get(&self, key: &Bytes) -> Option<Bytes> {
+        self.kv.get(key).map(|e| e.value.to_owned())
+    }
+
+    pub fn set(&mut self, key: &Bytes, val: &Bytes, ttl: u64) {
+        // key and val pointing to memory area with parsed request.
+        // copy to avoid mem leak.
+        let key = Bytes::copy_from_slice(key.as_ref());
+        let value = Bytes::copy_from_slice(val.as_ref());
+        self.kv.insert(key, Entry { value, ttl });
     }
 }
 
@@ -27,6 +44,7 @@ pub async fn listen(addr: &str) -> Result<(), io::Error> {
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on {addr}");
 
+    // TODO: use RWLock
     let db = Arc::new(Mutex::new(Storage::new()));
     loop {
         let (sock, addr) = listener.accept().await?;
@@ -72,18 +90,28 @@ pub async fn handle_conn(
 const RSP_OK: &[u8] = b"+OK\r\n";
 const RSP_NUL_STR: &[u8] = b"$-1\r\n";
 
+fn str_response(msg: &Bytes) -> Bytes {
+    let mut out = BytesMut::new();
+    out.put_u8(b'$');
+    out.extend_from_slice(msg.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(msg);
+    out.extend_from_slice(b"\r\n");
+    out.freeze()
+}
+
 async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow::Result<()> {
     // TODO: proper response builder
     let rsp = match req {
         Request::Ping => Bytes::from_static(b"+PONG\r\n"),
-        Request::Echo { msg } => {
-            let mut out = BytesMut::new();
-            out.put_u8(b'$');
-            out.extend_from_slice(msg.len().to_string().as_bytes());
-            out.extend_from_slice(b"\r\n");
-            out.extend_from_slice(&msg);
-            out.extend_from_slice(b"\r\n");
-            out.freeze()
+        Request::Echo { msg } => str_response(&msg),
+        Request::Get { key } => match db.lock().await.get(&key) {
+            Some(val) => str_response(&val),
+            None => Bytes::from_static(RSP_NUL_STR),
+        },
+        Request::Set { key, val, ttl } => {
+            db.lock().await.set(&key, &val, ttl);
+            Bytes::from_static(RSP_OK)
         }
     };
 
