@@ -1,9 +1,9 @@
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 
-pub async fn read_stream<T>(s: &mut T) -> Result<Option<()>>
+pub async fn read_stream<T>(s: &mut T) -> anyhow::Result<Option<()>>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
