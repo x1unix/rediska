@@ -77,6 +77,7 @@ impl ParseError {
         match self {
             Self::BadFrame(r) => Self::BadFrame(r.with_offset(addr)),
             Self::BadLength((r, l)) => Self::BadLength((r.with_offset(addr), l)),
+            Self::NanLength((r, l)) => Self::NanLength((r.with_offset(addr), l)),
             Self::UnexpectedFrame { offset, frame } => Self::UnexpectedFrame {
                 offset: offset + addr,
                 frame,
@@ -157,7 +158,7 @@ pub fn read_int(src: &[u8], offset: usize, signed: bool) -> Result<(i64, usize),
         match src.get(i) {
             Some(b'\r') => {
                 // End of frame
-                return if is_empty || !signed {
+                return if is_empty || (!signed && acc < 0) {
                     Err(ParseError::BadLength((BufRef(offset, i - offset), acc)))
                 } else {
                     Ok((acc, i))
