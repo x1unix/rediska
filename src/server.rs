@@ -1,101 +1,68 @@
-use crate::assembler::Value;
-use bytes::Bytes;
+use bytes::{BufMut, BytesMut};
+use std::fmt;
+use std::net::SocketAddr;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::reader::{ReadError, StreamParser};
+use crate::request::{Request, RequestError};
 
-#[derive(Debug, Error)]
-pub enum RequestError {
-    #[error("unknown command")]
-    UnknownCommand(Bytes),
-
-    #[error("empty command")]
-    EmptyCommand,
-
-    #[error("invalid payload")]
-    InvalidPayload(Value),
-
-    #[error("invalid command key type")]
-    InvalidCommandKeyType,
-
-    #[error("invalid argument")]
-    InvalidArgumentType { pos: usize },
-
-    #[error("invalid args count")]
-    InvalidArgsCount {
-        want: usize,
-        got: usize,
-        cmd: &'static str,
-    },
-}
-
-pub enum Request {
-    Ping,
-    Echo { msg: Bytes },
-    // TODO: add another commands
-}
-
-impl Request {
-    fn new_ping(args: &[Value]) -> Result<Self, RequestError> {
-        if args.is_empty() {
-            Ok(Self::Ping)
-        } else {
-            Err(RequestError::InvalidArgsCount {
-                want: 0,
-                got: args.len(),
-                cmd: "PING",
-            })
+// TODO: use traits instead
+pub async fn handle_conn(addr: SocketAddr, mut s: TcpStream) -> anyhow::Result<()> {
+    println!("Conn: {addr}");
+    loop {
+        match read_request(&mut s).await {
+            Ok(Some(req)) => respond(&mut s, req).await.unwrap_or_else(|e| {
+                println!("Err: can't write response: {e:?}");
+            }),
+            Ok(None) => break,
+            Err(RequestError::ReadError(ReadError::Io(err))) => {
+                println!("IO Error: {err:?}");
+                break;
+            }
+            Err(err) => {
+                println!("Err: {err:?}");
+                dump_err(&mut s, err).await;
+                break;
+            }
         }
     }
 
-    fn new_echo(args: &[Value]) -> Result<Self, RequestError> {
-        if args.len() != 1 {
-            return Err(RequestError::InvalidArgsCount {
-                want: 1,
-                got: args.len(),
-                cmd: "ECHO",
-            });
-        }
+    Ok(())
+}
 
-        // TODO: support multiple strings?
-        let v = &args[0];
-        match v {
-            Value::String(b) => Ok(Self::Echo { msg: b.to_owned() }),
-            _ => Err(RequestError::InvalidArgumentType { pos: 0 }),
+async fn respond(s: &mut TcpStream, req: Request) -> anyhow::Result<()> {
+    // TODO: proper response builder
+    match req {
+        Request::Ping => s.write_all(b"+PONG\r\n").await?,
+        Request::Echo { msg } => {
+            let mut out = BytesMut::new();
+            out.put_u8(b'$');
+            out.extend_from_slice(msg.len().to_string().as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(&msg);
+            out.extend_from_slice(b"\r\n");
+            s.write_all(&out).await?
         }
+    };
+
+    Ok(())
+}
+
+async fn dump_err<E: fmt::Display>(s: &mut TcpStream, err: E) {
+    // TODO: make this in proper way
+    let msg = err.to_string().replace('\r', "\\r").replace('\n', "\\n");
+    if let Err(err) = s.write_all(format!("-ERR {msg}\r\n").as_bytes()).await {
+        println!("Err: can't write response: {err:?}");
     }
 }
 
-impl TryFrom<Value> for Request {
-    type Error = RequestError;
+async fn read_request(s: &mut TcpStream) -> Result<Option<Request>, RequestError> {
+    let mut parser = StreamParser::new(s, 1024);
+    let Some(val) = parser.parse().await? else {
+        return Ok(None);
+    };
 
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let Value::Array(arr) = value else {
-            return Err(RequestError::InvalidPayload(value));
-        };
-
-        // TODO: support pipelines, batches, etc.
-        let cmd = arr
-            .get(0)
-            .ok_or(RequestError::EmptyCommand)
-            .and_then(|v| match v {
-                Value::String(b) => {
-                    if b.is_empty() {
-                        Err(RequestError::EmptyCommand)
-                    } else {
-                        Ok(b)
-                    }
-                }
-                _ => Err(RequestError::InvalidCommandKeyType),
-            })?;
-
-        let args = &arr[1..];
-
-        // Redis commands are case-insensitive
-        match cmd.as_ref() {
-            cmd if cmd.eq_ignore_ascii_case(b"PING") => Self::new_ping(args),
-            cmd if cmd.eq_ignore_ascii_case(b"ECHO") => Self::new_echo(args),
-            _ => Err(RequestError::UnknownCommand(cmd.to_owned())),
-        }
-    }
+    let req: Request = val.try_into()?;
+    Ok(Some(req))
 }
