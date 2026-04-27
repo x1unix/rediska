@@ -25,7 +25,6 @@ pub struct StreamParser<T: AsyncRead + Unpin> {
     buf: BytesMut,
     pos: usize,
     total_bytes: usize, // global offset
-    refs: Vec<ValueRef>,
 }
 
 impl<T> StreamParser<T>
@@ -36,7 +35,6 @@ where
         Self {
             reader: src,
             buf: BytesMut::with_capacity(buff_size),
-            refs: Vec::with_capacity(4),
             pos: 0,
             total_bytes: 0,
         }

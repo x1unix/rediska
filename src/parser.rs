@@ -59,7 +59,10 @@ pub enum ParseError {
     BadFrame(BufRef),
 
     #[error("invalid length value")]
-    BadLength(BufRef),
+    BadLength((BufRef, i64)),
+
+    #[error("cannot parse length")]
+    NanLength((BufRef, u8)),
 
     #[error("unexpected frame")]
     UnexpectedFrame { offset: usize, frame: FrameKind },
@@ -73,7 +76,7 @@ impl ParseError {
     pub fn with_offset(self, addr: usize) -> ParseError {
         match self {
             Self::BadFrame(r) => Self::BadFrame(r.with_offset(addr)),
-            Self::BadLength(r) => Self::BadLength(r.with_offset(addr)),
+            Self::BadLength((r, l)) => Self::BadLength((r.with_offset(addr), l)),
             Self::UnexpectedFrame { offset, frame } => Self::UnexpectedFrame {
                 offset: offset + addr,
                 frame,
@@ -117,14 +120,14 @@ pub fn parse_frame(src: &[u8], offset: usize) -> Result<Option<(FrameKind, usize
             let (len, next) = read_int(src, offset + 1, true)?;
             match len {
                 -1 => Ok(Some((FrameKind::NullBulkString, next))),
-                x if x > 0 => Ok(Some((
+                x if x >= 0 => Ok(Some((
                     FrameKind::BulkString {
                         len: x as u64,
                         width: next - offset, // Size of "$<digits...>" segment w/o CRLF
                     },
                     next,
                 ))),
-                _ => Err(ParseError::BadLength(BufRef(offset, next))),
+                _ => Err(ParseError::BadLength((BufRef(offset, next), len))),
             }
         }
         _ => Err(ParseError::UnknownFrame { offset, val: *ch }),
@@ -135,7 +138,7 @@ pub fn read_uint(src: &[u8], offset: usize) -> Result<(u64, usize), ParseError> 
     let (val, next) = read_int(src, offset, false)?;
     u64::try_from(val)
         .map(|v| (v, next))
-        .map_err(|_| ParseError::BadLength(BufRef(offset, next)))
+        .map_err(|_| ParseError::BadLength((BufRef(offset, next), val)))
 }
 
 /// Reads a given buffer from offset and reads an integer value till carriage return character (\n).
@@ -155,7 +158,7 @@ pub fn read_int(src: &[u8], offset: usize, signed: bool) -> Result<(i64, usize),
             Some(b'\r') => {
                 // End of frame
                 return if is_empty || !signed {
-                    Err(ParseError::BadLength(BufRef(offset, i - offset)))
+                    Err(ParseError::BadLength((BufRef(offset, i - offset), acc)))
                 } else {
                     Ok((acc, i))
                 };
@@ -172,10 +175,10 @@ pub fn read_int(src: &[u8], offset: usize, signed: bool) -> Result<(i64, usize),
                             v.checked_add(d)
                         }
                     })
-                    .ok_or(ParseError::BadLength(BufRef(offset, i - offset)))?;
+                    .ok_or(ParseError::BadLength((BufRef(offset, i - offset), acc)))?;
                 i += 1;
             }
-            Some(_) => return Err(ParseError::BadLength(BufRef(offset, i - offset))),
+            Some(c) => return Err(ParseError::NanLength((BufRef(offset, i - offset), *c))),
             None => return Err(ParseError::IncompleteBuffer),
         }
     }
