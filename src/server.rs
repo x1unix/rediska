@@ -1,20 +1,58 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use std::sync::Arc;
+use tokio::io::{self, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError};
 
+pub struct Storage {
+    kv: HashMap<Bytes, Bytes>,
+}
+
+impl Storage {
+    pub fn new() -> Self {
+        Self { kv: HashMap::new() }
+    }
+}
+
+type SyncStorage = Arc<Mutex<Storage>>;
+
+/// Starts Redis listener on a given address.
+pub async fn listen(addr: &str) -> Result<(), io::Error> {
+    let listener = TcpListener::bind(addr).await?;
+    println!("Listening on {addr}");
+
+    let db = Arc::new(Mutex::new(Storage::new()));
+    loop {
+        let (sock, addr) = listener.accept().await?;
+        let db = db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(addr, sock, db.clone()).await {
+                println!("Error: {e}");
+            }
+        });
+    }
+}
+
 // TODO: use traits instead
-pub async fn handle_conn(addr: SocketAddr, mut s: TcpStream) -> anyhow::Result<()> {
+pub async fn handle_conn(
+    addr: SocketAddr,
+    mut s: TcpStream,
+    db: SyncStorage,
+) -> anyhow::Result<()> {
     println!("Conn: {addr}");
     loop {
         match read_request(&mut s).await {
-            Ok(Some(req)) => respond(&mut s, req).await.unwrap_or_else(|e| {
-                println!("Err: can't write response: {e:?}");
-            }),
+            Ok(Some(req)) => handle_req(&mut s, req, db.clone())
+                .await
+                .unwrap_or_else(|e| {
+                    println!("Err: can't write response: {e:?}");
+                }),
             Ok(None) => break,
             Err(RequestError::ReadError(ReadError::Io(err))) => {
                 println!("IO Error: {err:?}");
@@ -31,10 +69,13 @@ pub async fn handle_conn(addr: SocketAddr, mut s: TcpStream) -> anyhow::Result<(
     Ok(())
 }
 
-async fn respond(s: &mut TcpStream, req: Request) -> anyhow::Result<()> {
+const RSP_OK: &[u8] = b"+OK\r\n";
+const RSP_NUL_STR: &[u8] = b"$-1\r\n";
+
+async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow::Result<()> {
     // TODO: proper response builder
-    match req {
-        Request::Ping => s.write_all(b"+PONG\r\n").await?,
+    let rsp = match req {
+        Request::Ping => Bytes::from_static(b"+PONG\r\n"),
         Request::Echo { msg } => {
             let mut out = BytesMut::new();
             out.put_u8(b'$');
@@ -42,10 +83,11 @@ async fn respond(s: &mut TcpStream, req: Request) -> anyhow::Result<()> {
             out.extend_from_slice(b"\r\n");
             out.extend_from_slice(&msg);
             out.extend_from_slice(b"\r\n");
-            s.write_all(&out).await?
+            out.freeze()
         }
     };
 
+    s.write_all(&rsp).await?;
     Ok(())
 }
 

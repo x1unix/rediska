@@ -12,17 +12,11 @@ const ADDR: &str = "127.0.0.1:6379";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let listener = TcpListener::bind(ADDR).await?;
-    println!("Listening on {ADDR}");
+    if let Err(err) = server::listen(ADDR).await {
+        println!("Error: {err}");
+    };
 
-    loop {
-        let (sock, addr) = listener.accept().await?;
-        tokio::spawn(async move {
-            if let Err(e) = server::handle_conn(addr, sock).await {
-                println!("Error: {e}");
-            }
-        });
-    }
+    Ok(())
 }
 
 // pub async fn read_stream<T>(s: &mut T) -> anyhow::Result<Option<()>>
