@@ -1,18 +1,20 @@
+use anyhow::Context;
 use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
-use crate::request::{Request, RequestError};
+use crate::request::{Request, RequestError, TTL};
 
-struct Entry {
+pub struct Entry {
     value: Bytes,
-    ttl: u64,
+    expire_at: Option<Duration>,
 }
 
 pub struct Storage {
@@ -24,16 +26,24 @@ impl Storage {
         Self { kv: HashMap::new() }
     }
 
-    pub fn get(&self, key: &Bytes) -> Option<Bytes> {
-        self.kv.get(key).map(|e| e.value.to_owned())
+    pub fn get(&self, key: &Bytes) -> Option<&Entry> {
+        // let now = SystemTime::now().duration_since(UNIX_EPOCH);
+        // self.kv.get(key).map(|e| e.value.to_owned())
+        self.kv.get(key)
     }
 
-    pub fn set(&mut self, key: &Bytes, val: &Bytes, ttl: u64) {
+    pub fn set(&mut self, key: &Bytes, val: &Bytes, expire_at: Option<Duration>) {
         // key and val pointing to memory area with parsed request.
         // copy to avoid mem leak.
         let key = Bytes::copy_from_slice(key.as_ref());
         let value = Bytes::copy_from_slice(val.as_ref());
-        self.kv.insert(key, Entry { value, ttl });
+        self.kv.insert(key, Entry { value, expire_at });
+    }
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -101,15 +111,23 @@ fn str_response(msg: &Bytes) -> Bytes {
 }
 
 async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("unable to get system timestamp")?;
+
     // TODO: proper response builder
     let rsp = match req {
         Request::Ping => Bytes::from_static(b"+PONG\r\n"),
         Request::Echo { msg } => str_response(&msg),
-        Request::Get { key } => match db.lock().await.get(&key) {
-            Some(val) => str_response(&val),
-            None => Bytes::from_static(RSP_NUL_STR),
-        },
+        Request::Get { key } => db
+            .lock()
+            .await
+            .get(&key)
+            .filter(|v| v.expire_at.map(|ttl| ttl > now).unwrap_or(true))
+            .map(|v| str_response(&v.value))
+            .unwrap_or_else(|| Bytes::from_static(RSP_NUL_STR)),
         Request::Set { key, val, ttl } => {
+            let ttl = ttl.map(|v| v.as_unix()).transpose()?;
             db.lock().await.set(&key, &val, ttl);
             Bytes::from_static(RSP_OK)
         }

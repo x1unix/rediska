@@ -17,6 +17,46 @@ pub enum Value {
 }
 
 #[derive(Debug, Error)]
+pub enum ValueTypeError {
+    #[error("value is not a scalar value")]
+    NotAScalar,
+
+    #[error("value is not a string")]
+    NotAString,
+
+    #[error("invalid utf8 value")]
+    Utf8Error(#[from] std::str::Utf8Error),
+
+    #[error("not an integer")]
+    ParseIntError(#[from] std::num::ParseIntError),
+}
+
+impl<'a> TryFrom<&'a Value> for &'a Bytes {
+    type Error = ValueTypeError;
+
+    fn try_from(value: &'a Value) -> Result<Self, Self::Error> {
+        if let Value::String(val) = value {
+            Ok(val)
+        } else {
+            Err(ValueTypeError::NotAScalar)
+        }
+    }
+}
+
+impl TryFrom<&Value> for u64 {
+    type Error = ValueTypeError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        if let Value::String(val) = value {
+            let s = std::str::from_utf8(val.as_ref())?;
+            Ok(s.parse::<u64>()?)
+        } else {
+            Err(ValueTypeError::NotAScalar)
+        }
+    }
+}
+
+#[derive(Debug, Error)]
 pub enum AssembleError {
     #[error("missing array item")]
     MissingArrayItem { array_len: usize, index: usize },
@@ -26,7 +66,7 @@ pub enum AssembleError {
 }
 
 pub fn assemble(buf: Bytes, refs: &[ValueRef]) -> Result<Option<Value>, AssembleError> {
-    let Some(val) = refs.get(0) else {
+    let Some(val) = refs.first() else {
         return Ok(None);
     };
 
@@ -44,10 +84,10 @@ fn assemble_value(
     head: &ValueRef,
     tail: &[ValueRef],
 ) -> Result<AssembleChunk, AssembleError> {
-    return match head {
+    match head {
         ValueRef::Array { len } => assemble_array(buf, tail, *len),
         ValueRef::String(r) => Ok(assemble_string(buf, r)),
-    };
+    }
 }
 
 fn assemble_array(

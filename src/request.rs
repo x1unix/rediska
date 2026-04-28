@@ -1,4 +1,10 @@
-use crate::{assembler::Value, parser::ParseError, reader::ReadError};
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
+
+use crate::{
+    assembler::{Value, ValueTypeError},
+    parser::ParseError,
+    reader::ReadError,
+};
 use bytes::Bytes;
 
 use thiserror::Error;
@@ -22,7 +28,7 @@ pub enum RequestError {
     InvalidCommandKeyType,
 
     #[error("invalid argument")]
-    InvalidArgumentType { pos: usize },
+    InvalidArgumentType { pos: usize, err: ValueTypeError },
 
     #[error("invalid args count")]
     InvalidArgsCount {
@@ -33,6 +39,9 @@ pub enum RequestError {
 
     #[error("missing key")]
     MissingKey { cmd: &'static str },
+
+    #[error("missing option value")]
+    MissingOptValue { cmd: &'static str, pos: usize },
 }
 
 struct ArgReader<'a> {
@@ -64,12 +73,15 @@ impl<'a> ArgReader<'a> {
     }
 
     fn str(&mut self) -> Result<Bytes, RequestError> {
-        match self.args.get(0) {
+        match self.args.first() {
             Some(Value::String(b)) => {
                 self.advance(1);
                 Ok(b.to_owned())
             }
-            Some(_) => Err(RequestError::InvalidArgumentType { pos: self.offset }),
+            Some(_) => Err(RequestError::InvalidArgumentType {
+                pos: self.offset,
+                err: ValueTypeError::NotAString,
+            }),
             None => Err(RequestError::InvalidArgsCount {
                 want: self.offset + 1,
                 got: self.offset,
@@ -98,7 +110,10 @@ impl<'a> ArgReader<'a> {
                         Ok(b.to_owned())
                     }
                 }
-                _ => Err(RequestError::InvalidArgumentType { pos: i }),
+                _ => Err(RequestError::InvalidArgumentType {
+                    pos: i,
+                    err: ValueTypeError::NotAString,
+                }),
             })
             .collect::<Result<Vec<Bytes>, RequestError>>()?;
 
@@ -107,6 +122,40 @@ impl<'a> ArgReader<'a> {
 
         self.advance(2);
         Ok((k, v))
+    }
+
+    fn get_opt(&mut self, key: &[u8]) -> Result<Option<&Value>, RequestError> {
+        // first some && first is string && first eq key
+        let ok = match self.args.first() {
+            Some(Value::String(k)) => k.as_ref().eq_ignore_ascii_case(key),
+            _ => false,
+        };
+
+        if !ok {
+            return Ok(None);
+        }
+
+        if let Some(v) = self.args.get(1) {
+            self.advance(2);
+            Ok(Some(v))
+        } else {
+            Err(RequestError::MissingOptValue {
+                cmd: self.cmd,
+                pos: self.offset,
+            })
+        }
+    }
+
+    fn get_opt_u64(&mut self, key: &[u8]) -> Result<Option<u64>, RequestError> {
+        let offset = self.offset;
+        self.get_opt(key)?
+            .map(|v| {
+                u64::try_from(v).map_err(|e| RequestError::InvalidArgumentType {
+                    pos: offset + 2,
+                    err: e,
+                })
+            })
+            .transpose()
     }
 
     fn assert_empty(&self) -> Result<(), RequestError> {
@@ -122,11 +171,44 @@ impl<'a> ArgReader<'a> {
     }
 }
 
+pub enum TTL {
+    Duration(Duration),
+    Timestamp(Duration),
+}
+
+impl TryInto<Duration> for TTL {
+    type Error = SystemTimeError;
+
+    fn try_into(self) -> Result<Duration, Self::Error> {
+        self.as_unix()
+    }
+}
+
+impl TTL {
+    /// Returns Unix timestamp duration from TTL value based on current system time.
+    pub fn as_unix(&self) -> Result<Duration, SystemTimeError> {
+        match self {
+            TTL::Duration(dur) => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|now| now + dur.to_owned()),
+            TTL::Timestamp(ts) => Ok(ts.to_owned()),
+        }
+    }
+}
+
 pub enum Request {
     Ping,
-    Echo { msg: Bytes },
-    Get { key: Bytes },
-    Set { key: Bytes, val: Bytes, ttl: u64 },
+    Echo {
+        msg: Bytes,
+    },
+    Get {
+        key: Bytes,
+    },
+    Set {
+        key: Bytes,
+        val: Bytes,
+        ttl: Option<TTL>,
+    },
     // TODO: add another commands
 }
 
@@ -149,14 +231,24 @@ impl Request {
     fn new_set(args: &[Value]) -> Result<Self, RequestError> {
         let mut r = ArgReader::new("SET", args);
 
-        // TODO: support TTL
-        let (k, v) = r.kv()?;
+        let (key, val) = r.kv()?;
+
+        // TODO: this logic is brittle and relies on args ordering.
+        let ttl = if let Some(v) = r.get_opt_u64(b"EX")? {
+            Some(TTL::Duration(Duration::from_secs(v)))
+        } else if let Some(v) = r.get_opt_u64(b"PX")? {
+            Some(TTL::Duration(Duration::from_millis(v)))
+        } else if let Some(v) = r.get_opt_u64(b"EXAT")? {
+            Some(TTL::Timestamp(Duration::from_secs(v)))
+        } else {
+            // Clippy warns about manual_map unless I do this:
+            r.get_opt_u64(b"PXAT")?
+                .map(|v| TTL::Timestamp(Duration::from_millis(v)))
+        };
+
+        // TODO: support NX, XX, IFEQ, IFDEQ, etc options.
         r.assert_empty()?;
-        Ok(Self::Set {
-            key: k,
-            val: v,
-            ttl: 0,
-        })
+        Ok(Self::Set { key, val, ttl })
     }
 
     fn new_get(args: &[Value]) -> Result<Self, RequestError> {
