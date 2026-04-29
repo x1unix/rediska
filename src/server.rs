@@ -17,6 +17,15 @@ pub struct Entry {
     expire_at: Option<Duration>,
 }
 
+impl Entry {
+    pub fn ttl_is_before(&self, now: Duration) -> bool {
+        match self.expire_at {
+            Some(ttl) => ttl > now,
+            None => true,
+        }
+    }
+}
+
 pub struct Storage {
     kv: HashMap<Bytes, Entry>,
 }
@@ -38,6 +47,10 @@ impl Storage {
         let key = Bytes::copy_from_slice(key.as_ref());
         let value = Bytes::copy_from_slice(val.as_ref());
         self.kv.insert(key, Entry { value, expire_at });
+    }
+
+    pub fn del(&mut self, key: &Bytes) -> Option<Entry> {
+        self.kv.remove(key)
     }
 }
 
@@ -112,21 +125,29 @@ fn str_response(msg: &Bytes) -> Bytes {
 }
 
 async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow::Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("unable to get system timestamp")?;
-
     // TODO: proper response builder
     let rsp = match req {
         Request::Ping => Bytes::from_static(b"+PONG\r\n"),
         Request::Echo { msg } => str_response(&msg),
-        Request::Get { key } => db
-            .lock()
-            .await
-            .get(&key)
-            .filter(|v| v.expire_at.map(|ttl| ttl > now).unwrap_or(true))
-            .map(|v| str_response(&v.value))
-            .unwrap_or_else(|| Bytes::from_static(RSP_NUL_STR)),
+        Request::Get { key } => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("unable to get system timestamp")?;
+
+            let mut db = db.lock().await;
+            match db.get(&key) {
+                Some(e) => {
+                    if e.ttl_is_before(now) {
+                        str_response(&e.value)
+                    } else {
+                        // TODO: staleness checker
+                        db.del(&key);
+                        Bytes::from_static(RSP_NUL_STR)
+                    }
+                }
+                _ => Bytes::from_static(RSP_NUL_STR),
+            }
+        }
         Request::Set { key, val, ttl } => {
             let ttl = ttl.map(|v| v.as_unix()).transpose()?;
             db.lock().await.set(&key, &val, ttl);
