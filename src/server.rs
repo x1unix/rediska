@@ -74,8 +74,9 @@ pub async fn handle_conn(
     db: SyncStorage,
 ) -> anyhow::Result<()> {
     println!("Conn: {addr}");
+    let mut buf = BytesMut::with_capacity(1024);
     loop {
-        match read_request(&mut s).await {
+        match read_request(&mut buf, &mut s).await {
             Ok(Some(req)) => handle_req(&mut s, req, db.clone())
                 .await
                 .unwrap_or_else(|e| {
@@ -145,8 +146,11 @@ async fn dump_err<E: fmt::Display>(s: &mut TcpStream, err: E) {
     }
 }
 
-async fn read_request(s: &mut TcpStream) -> Result<Option<Request>, RequestError> {
-    let mut parser = StreamParser::new(s, 1024);
+async fn read_request(
+    buf: &mut BytesMut,
+    s: &mut TcpStream,
+) -> Result<Option<Request>, RequestError> {
+    let mut parser = StreamParser::new(s, buf);
     let Some(val) = parser.parse().await? else {
         return Ok(None);
     };

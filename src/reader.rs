@@ -20,21 +20,21 @@ pub enum ReadError {
     Io(#[from] std::io::Error),
 }
 
-pub struct StreamParser<T: AsyncRead + Unpin> {
+pub struct StreamParser<'a, T: AsyncRead + Unpin> {
     reader: T,
-    buf: BytesMut,
+    buf: &'a mut BytesMut,
     pos: usize,
     total_bytes: usize, // global offset
 }
 
-impl<T> StreamParser<T>
+impl<'a, T> StreamParser<'a, T>
 where
     T: AsyncRead + Unpin,
 {
-    pub fn new(src: T, buff_size: usize) -> Self {
+    pub fn new(src: T, buf: &'a mut BytesMut) -> Self {
         Self {
             reader: src,
-            buf: BytesMut::with_capacity(buff_size),
+            buf,
             pos: 0,
             total_bytes: 0,
         }
