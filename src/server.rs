@@ -11,9 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError, TTL};
-use crate::storage::{Entry, MemDB, Value};
-
-type SyncStorage = Arc<Mutex<MemDB>>;
+use crate::storage::{Entry, Keyspace, MemDB, Value};
 
 /// Starts Redis listener on a given address.
 pub async fn listen(addr: &str) -> Result<(), io::Error> {
@@ -21,7 +19,8 @@ pub async fn listen(addr: &str) -> Result<(), io::Error> {
     println!("Listening on {addr}");
 
     // TODO: use RWLock
-    let db = Arc::new(Mutex::new(MemDB::new()));
+    // let db = Arc::new(Mutex::new(MemDB::new()));
+    let db = Arc::new(Keyspace::default());
     loop {
         let (sock, addr) = listener.accept().await?;
         let db = db.clone();
@@ -37,7 +36,7 @@ pub async fn listen(addr: &str) -> Result<(), io::Error> {
 pub async fn handle_conn(
     addr: SocketAddr,
     mut s: TcpStream,
-    db: SyncStorage,
+    db: Arc<Keyspace>,
 ) -> anyhow::Result<()> {
     println!("Conn: {addr}");
     let mut buf = BytesMut::with_capacity(1024);
@@ -68,8 +67,6 @@ const RSP_OK: &[u8] = b"+OK\r\n";
 const RSP_NUL_STR: &[u8] = b"$-1\r\n";
 
 // TODO: use error types
-const ERR_BAD_TYPE: &[u8] = b"-WRONGTYPE operation against a key holding the wrong kind of value";
-
 fn str_response(msg: &Bytes) -> Bytes {
     let mut out = BytesMut::new();
     out.put_u8(b'$');
@@ -80,33 +77,36 @@ fn str_response(msg: &Bytes) -> Bytes {
     out.freeze()
 }
 
-async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow::Result<()> {
+async fn handle_req(s: &mut TcpStream, req: Request, db: Arc<Keyspace>) -> anyhow::Result<()> {
     // TODO: proper response builder + staleness checker
     let rsp = match req {
         Request::Ping => Bytes::from_static(b"+PONG\r\n"),
         Request::Echo { msg } => str_response(&msg),
-        Request::Get { key } => {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("unable to get system timestamp")?;
-
-            let db = db.lock().await;
-            let v = db
-                .get(&key)
-                .filter(|v| v.ttl_is_before(now))
-                .map(|v| &v.value);
-
-            match v {
-                Some(Value::String(b)) => str_response(b),
-                Some(_) => Bytes::from_static(ERR_BAD_TYPE),
-                _ => Bytes::from_static(RSP_NUL_STR),
-            }
-        }
+        Request::Get { key } => db
+            .scalar_get(&key)
+            .await
+            .map(|r| match r {
+                Some(b) => str_response(&b),
+                None => Bytes::from_static(RSP_NUL_STR),
+            })
+            .unwrap_or_else(|e| e.as_resp_bytes()),
+        // Request::Get { key } => match db.scalar_get(&key).await? {
+        //     Some(b) => str_response(&b),
+        //     None => Bytes::from_static(RSP_NUL_STR),
+        // },
         Request::Set { key, val, ttl } => {
             let ttl = ttl.map(|v| v.as_unix()).transpose()?;
-            db.lock().await.set(&key, Entry::new_string(&val, ttl));
-            Bytes::from_static(RSP_OK)
+            db.scalar_set(&key, &val, ttl)
+                .await
+                .map(|_| Bytes::from_static(RSP_OK))
+                .unwrap_or_else(|e| e.as_resp_bytes())
+            // Bytes::from_static(RSP_OK)
         }
+        Request::Rpush { key, values } => db
+            .list_push(&key, values)
+            .await
+            .map(|n| Bytes::from(format!(":{n}\r\n")))
+            .unwrap_or_else(|e| e.as_resp_bytes()),
     };
 
     s.write_all(&rsp).await?;

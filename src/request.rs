@@ -169,6 +169,31 @@ impl<'a> ArgReader<'a> {
             })
         }
     }
+
+    fn collect_strs(&self) -> Result<Vec<Bytes>, RequestError> {
+        if self.args.is_empty() {
+            return Err(RequestError::InvalidArgsCount {
+                want: self.offset + 1,
+                got: self.offset,
+                cmd: self.cmd,
+            });
+        }
+
+        let offset = self.offset;
+        self.args
+            .iter()
+            .enumerate()
+            .map(|(i, e)| match e {
+                // Bytes are referencing to request payload region.
+                // Copy values to avoid leaking memory.
+                Value::String(b) => Ok(Bytes::copy_from_slice(b)),
+                _ => Err(RequestError::InvalidArgumentType {
+                    pos: offset + i,
+                    err: ValueTypeError::NotAScalar,
+                }),
+            })
+            .collect()
+    }
 }
 
 pub enum TTL {
@@ -208,6 +233,10 @@ pub enum Request {
         key: Bytes,
         val: Bytes,
         ttl: Option<TTL>,
+    },
+    Rpush {
+        key: Bytes,
+        values: Vec<Bytes>,
     },
     // TODO: add another commands
 }
@@ -258,6 +287,13 @@ impl Request {
 
         Ok(Self::Get { key })
     }
+
+    fn new_rpush(args: &[Value]) -> Result<Self, RequestError> {
+        let mut r = ArgReader::new("RPUSH", args);
+        let key = r.str()?;
+        let values = r.collect_strs()?;
+        Ok(Self::Rpush { key, values })
+    }
 }
 
 impl TryFrom<Value> for Request {
@@ -270,7 +306,7 @@ impl TryFrom<Value> for Request {
 
         // TODO: support pipelines, batches, etc.
         let cmd = arr
-            .get(0)
+            .first()
             .ok_or(RequestError::EmptyCommand)
             .and_then(|v| match v {
                 Value::String(b) => {
@@ -291,6 +327,7 @@ impl TryFrom<Value> for Request {
             cmd if cmd.eq_ignore_ascii_case(b"ECHO") => Self::new_echo(args),
             cmd if cmd.eq_ignore_ascii_case(b"GET") => Self::new_get(args),
             cmd if cmd.eq_ignore_ascii_case(b"SET") => Self::new_set(args),
+            cmd if cmd.eq_ignore_ascii_case(b"RPUSH") => Self::new_rpush(args),
             _ => Err(RequestError::UnknownCommand(cmd.to_owned())),
         }
     }
