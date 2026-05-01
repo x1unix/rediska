@@ -5,8 +5,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DBError {
-    #[error("operation against a key holding the wrong kind of value")]
-    WrongKeyType,
+    #[error("WRONGTYPE operation against a key holding the wrong kind of value")]
+    WrongType,
 }
 
 /// Describes value stored in DB.
@@ -16,11 +16,21 @@ pub enum Value {
 }
 
 pub struct Entry {
-    pub value: Bytes,
+    pub value: Value,
     pub expire_at: Option<Duration>,
 }
 
 impl Entry {
+    pub fn new_string(val: &Bytes, expire_at: Option<Duration>) -> Self {
+        // value pointing to memory area with parsed request.
+        // copy to avoid mem leak.
+        let b = Bytes::copy_from_slice(val.as_ref());
+        Self {
+            value: Value::String(b),
+            expire_at,
+        }
+    }
+
     pub fn ttl_is_before(&self, now: Duration) -> bool {
         match self.expire_at {
             Some(ttl) => ttl > now,
@@ -39,17 +49,14 @@ impl MemDB {
     }
 
     pub fn get(&self, key: &Bytes) -> Option<&Entry> {
-        // let now = SystemTime::now().duration_since(UNIX_EPOCH);
-        // self.kv.get(key).map(|e| e.value.to_owned())
         self.kv.get(key)
     }
 
-    pub fn set(&mut self, key: &Bytes, val: &Bytes, expire_at: Option<Duration>) {
-        // key and val pointing to memory area with parsed request.
+    pub fn set(&mut self, key: &Bytes, entry: Entry) {
+        // key is pointing to memory area with parsed request.
         // copy to avoid mem leak.
         let key = Bytes::copy_from_slice(key.as_ref());
-        let value = Bytes::copy_from_slice(val.as_ref());
-        self.kv.insert(key, Entry { value, expire_at });
+        self.kv.insert(key, entry);
     }
 
     pub fn del(&mut self, key: &Bytes) -> Option<Entry> {

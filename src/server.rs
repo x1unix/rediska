@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError, TTL};
-use crate::storage::MemDB;
+use crate::storage::{Entry, MemDB, Value};
 
 type SyncStorage = Arc<Mutex<MemDB>>;
 
@@ -67,6 +67,9 @@ pub async fn handle_conn(
 const RSP_OK: &[u8] = b"+OK\r\n";
 const RSP_NUL_STR: &[u8] = b"$-1\r\n";
 
+// TODO: use error types
+const ERR_BAD_TYPE: &[u8] = b"-WRONGTYPE operation against a key holding the wrong kind of value";
+
 fn str_response(msg: &Bytes) -> Bytes {
     let mut out = BytesMut::new();
     out.put_u8(b'$');
@@ -78,7 +81,7 @@ fn str_response(msg: &Bytes) -> Bytes {
 }
 
 async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow::Result<()> {
-    // TODO: proper response builder
+    // TODO: proper response builder + staleness checker
     let rsp = match req {
         Request::Ping => Bytes::from_static(b"+PONG\r\n"),
         Request::Echo { msg } => str_response(&msg),
@@ -87,23 +90,21 @@ async fn handle_req(s: &mut TcpStream, req: Request, db: SyncStorage) -> anyhow:
                 .duration_since(UNIX_EPOCH)
                 .context("unable to get system timestamp")?;
 
-            let mut db = db.lock().await;
-            match db.get(&key) {
-                Some(e) => {
-                    if e.ttl_is_before(now) {
-                        str_response(&e.value)
-                    } else {
-                        // TODO: staleness checker
-                        db.del(&key);
-                        Bytes::from_static(RSP_NUL_STR)
-                    }
-                }
+            let db = db.lock().await;
+            let v = db
+                .get(&key)
+                .filter(|v| v.ttl_is_before(now))
+                .map(|v| &v.value);
+
+            match v {
+                Some(Value::String(b)) => str_response(b),
+                Some(_) => Bytes::from_static(ERR_BAD_TYPE),
                 _ => Bytes::from_static(RSP_NUL_STR),
             }
         }
         Request::Set { key, val, ttl } => {
             let ttl = ttl.map(|v| v.as_unix()).transpose()?;
-            db.lock().await.set(&key, &val, ttl);
+            db.lock().await.set(&key, Entry::new_string(&val, ttl));
             Bytes::from_static(RSP_OK)
         }
     };
