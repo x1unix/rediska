@@ -11,56 +11,9 @@ use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError, TTL};
+use crate::storage::MemDB;
 
-pub struct Entry {
-    value: Bytes,
-    expire_at: Option<Duration>,
-}
-
-impl Entry {
-    pub fn ttl_is_before(&self, now: Duration) -> bool {
-        match self.expire_at {
-            Some(ttl) => ttl > now,
-            None => true,
-        }
-    }
-}
-
-pub struct Storage {
-    kv: HashMap<Bytes, Entry>,
-}
-
-impl Storage {
-    pub fn new() -> Self {
-        Self { kv: HashMap::new() }
-    }
-
-    pub fn get(&self, key: &Bytes) -> Option<&Entry> {
-        // let now = SystemTime::now().duration_since(UNIX_EPOCH);
-        // self.kv.get(key).map(|e| e.value.to_owned())
-        self.kv.get(key)
-    }
-
-    pub fn set(&mut self, key: &Bytes, val: &Bytes, expire_at: Option<Duration>) {
-        // key and val pointing to memory area with parsed request.
-        // copy to avoid mem leak.
-        let key = Bytes::copy_from_slice(key.as_ref());
-        let value = Bytes::copy_from_slice(val.as_ref());
-        self.kv.insert(key, Entry { value, expire_at });
-    }
-
-    pub fn del(&mut self, key: &Bytes) -> Option<Entry> {
-        self.kv.remove(key)
-    }
-}
-
-impl Default for Storage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-type SyncStorage = Arc<Mutex<Storage>>;
+type SyncStorage = Arc<Mutex<MemDB>>;
 
 /// Starts Redis listener on a given address.
 pub async fn listen(addr: &str) -> Result<(), io::Error> {
@@ -68,7 +21,7 @@ pub async fn listen(addr: &str) -> Result<(), io::Error> {
     println!("Listening on {addr}");
 
     // TODO: use RWLock
-    let db = Arc::new(Mutex::new(Storage::new()));
+    let db = Arc::new(Mutex::new(MemDB::new()));
     loop {
         let (sock, addr) = listener.accept().await?;
         let db = db.clone();

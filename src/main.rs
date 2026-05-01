@@ -7,6 +7,7 @@ pub mod parser;
 pub mod reader;
 pub mod request;
 pub mod server;
+mod storage;
 
 const ADDR: &str = "127.0.0.1:6379";
 
