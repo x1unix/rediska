@@ -93,6 +93,27 @@ impl<'a> ArgReader<'a> {
         }
     }
 
+    fn maybe_next<T>(&mut self) -> Result<Option<T>, RequestError>
+    where
+        T: TryFrom<&'a Value, Error = ValueTypeError>,
+    {
+        let x = self
+            .args
+            .first()
+            .map(|v| T::try_from(v))
+            .transpose()
+            .map_err(|e| RequestError::InvalidArgumentType {
+                pos: self.offset,
+                err: e,
+            })?;
+
+        if x.is_some() {
+            self.advance(1);
+        }
+
+        Ok(x)
+    }
+
     fn next<T>(&mut self) -> Result<T, RequestError>
     where
         T: TryFrom<&'a Value, Error = ValueTypeError>,
@@ -367,7 +388,8 @@ impl Request {
     fn new_lpop(args: &[Value]) -> Result<Self, RequestError> {
         let mut r = ArgReader::new("LPOP", args);
         let key = r.str()?;
-        r.next::<usize>().and_then(|n| {
+        r.maybe_next::<usize>().and_then(|n| {
+            let n = n.unwrap_or(1);
             if n > 0 {
                 Ok(Self::Lpop { key, n })
             } else {
