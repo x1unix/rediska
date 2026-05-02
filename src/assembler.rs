@@ -100,7 +100,7 @@ fn assemble_array(
     let mut refs = tail;
     let mut drained_count: usize = 0;
     for i in 0..len {
-        let r = refs.get(0).ok_or(AssembleError::MissingArrayItem {
+        let r = refs.first().ok_or(AssembleError::MissingArrayItem {
             array_len: len,
             index: i,
         })?;

@@ -92,7 +92,7 @@ where
 
     async fn read_word(&mut self, len: usize) -> Result<BufRef, ReadError> {
         loop {
-            match check_word(&self.buf, self.pos, len) {
+            match check_word(self.buf, self.pos, len) {
                 Ok(word) => {
                     // let prev_pos = self.pos;
                     // let next_pos = self.pos + len + 2;
@@ -141,7 +141,7 @@ where
     async fn next_frame(&mut self) -> Result<Option<FrameKind>, ReadError> {
         // let prev_pos = self.pos;
         loop {
-            match parse_frame(&self.buf, self.pos) {
+            match parse_frame(self.buf, self.pos) {
                 Ok(Some((frame, next))) => {
                     self.pos = next;
                     // println!("frame: i={prev_pos}, next={next}, v={frame:?}");

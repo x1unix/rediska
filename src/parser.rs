@@ -3,22 +3,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug)]
 pub enum FrameKind {
-    Array { len: u64, width: usize },
-    BulkString { len: u64, width: usize },
+    Array { len: u64 },
+    BulkString { len: u64 },
     NullBulkString,
     Delimiter,
-}
-
-impl FrameKind {
-    /// Returns frame size in bytes
-    pub fn byte_len(&self) -> usize {
-        match self {
-            Self::Delimiter => 2,
-            Self::NullBulkString => 3,
-            Self::BulkString { width, .. } => *width,
-            Self::Array { width, .. } => *width,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -114,20 +102,13 @@ pub fn parse_frame(src: &[u8], offset: usize) -> Result<Option<(FrameKind, usize
         b'*' => {
             // TODO: maybe support null arrays (*-1)?
             let (len, next) = read_uint(src, offset + 1)?;
-            let width = next - offset; // Size of "*<digits...>" segment w/o CRLF
-            Ok(Some((FrameKind::Array { len, width }, next)))
+            Ok(Some((FrameKind::Array { len }, next)))
         }
         b'$' => {
             let (len, next) = read_int(src, offset + 1, true)?;
             match len {
                 -1 => Ok(Some((FrameKind::NullBulkString, next))),
-                x if x >= 0 => Ok(Some((
-                    FrameKind::BulkString {
-                        len: x as u64,
-                        width: next - offset, // Size of "$<digits...>" segment w/o CRLF
-                    },
-                    next,
-                ))),
+                x if x >= 0 => Ok(Some((FrameKind::BulkString { len: x as u64 }, next))),
                 _ => Err(ParseError::BadLength((BufRef(offset, next), len))),
             }
         }
