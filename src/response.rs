@@ -1,5 +1,14 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
+pub enum Response<'a> {
+    Ok,
+    Err { code: Option<&'a str>, err: &'a str },
+    BulkString(Bytes),
+    NullBulkString,
+    Integer(u64),
+    Array(Vec<Bytes>),
+}
+
 pub struct BufferBuilder {
     buf: BytesMut,
 }
@@ -16,9 +25,9 @@ impl BufferBuilder {
         Self::new(BytesMut::with_capacity(4096))
     }
 
-    pub fn err(&mut self, code: &str, msg: &str) {
+    pub fn err(&mut self, code: Option<&str>, msg: &str) {
         self.buf.put_u8(b'-');
-        self.buf.extend_from_slice(code.as_bytes());
+        self.buf.extend_from_slice(code.unwrap_or("ERR").as_bytes());
         self.buf.put_u8(b' ');
         self.buf.extend_from_slice(msg.as_bytes());
         self.buf.extend_from_slice(b"\r\n");
@@ -26,6 +35,10 @@ impl BufferBuilder {
 
     pub fn ok(&mut self) {
         self.buf.extend_from_slice(b"+OK\r\n");
+    }
+
+    pub fn pong(&mut self) {
+        self.buf.extend_from_slice(b"+PONG\r\n");
     }
 
     pub fn null_bulk_str(&mut self) {
@@ -46,6 +59,12 @@ impl BufferBuilder {
 
     fn eol(&mut self) {
         self.buf.extend_from_slice(b"\r\n");
+    }
+
+    pub fn str_simple(&mut self, msg: &[u8]) {
+        self.buf.put_u8(b'+');
+        self.buf.extend_from_slice(msg);
+        self.eol();
     }
 
     pub fn str_bulk(&mut self, msg: &[u8]) {

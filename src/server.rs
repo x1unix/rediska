@@ -11,7 +11,8 @@ use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError, TTL};
-use crate::storage::{Entry, Keyspace, MemDB, Value};
+use crate::response::BufferBuilder;
+use crate::storage::{Entry, KeyError, Keyspace, MemDB, Value};
 
 /// Starts Redis listener on a given address.
 pub async fn listen(addr: &str) -> Result<(), io::Error> {
@@ -40,13 +41,18 @@ pub async fn handle_conn(
 ) -> anyhow::Result<()> {
     println!("Conn: {addr}");
     let mut buf = BytesMut::with_capacity(1024);
+    let mut rsp = BufferBuilder::default();
+
     loop {
         match read_request(&mut buf, &mut s).await {
-            Ok(Some(req)) => handle_req(&mut s, req, db.clone())
-                .await
-                .unwrap_or_else(|e| {
-                    println!("Err: can't write response: {e:?}");
-                }),
+            Ok(Some(req)) => {
+                if let Err(err) = handle_req(&mut rsp, req, db.clone()).await {
+                    rsp.err(Some(err.code()), err.to_string().as_ref());
+                    println!("Err: {err:?}");
+                }
+
+                s.write_all(rsp.build().as_ref()).await?;
+            }
             Ok(None) => break,
             Err(RequestError::ReadError(ReadError::Io(err))) => {
                 println!("IO Error: {err:?}");
@@ -54,7 +60,8 @@ pub async fn handle_conn(
             }
             Err(err) => {
                 println!("Err: {err:?}");
-                dump_err(&mut s, err).await;
+                rsp.err(None, err.to_string().as_ref());
+                s.write_all(rsp.build().as_ref()).await?;
                 break;
             }
         }
@@ -63,62 +70,31 @@ pub async fn handle_conn(
     Ok(())
 }
 
-const RSP_OK: &[u8] = b"+OK\r\n";
-const RSP_NUL_STR: &[u8] = b"$-1\r\n";
-
-// TODO: use error types
-fn str_response(msg: &Bytes) -> Bytes {
-    let mut out = BytesMut::new();
-    out.put_u8(b'$');
-    out.extend_from_slice(msg.len().to_string().as_bytes());
-    out.extend_from_slice(b"\r\n");
-    out.extend_from_slice(msg);
-    out.extend_from_slice(b"\r\n");
-    out.freeze()
-}
-
-async fn handle_req(s: &mut TcpStream, req: Request, db: Arc<Keyspace>) -> anyhow::Result<()> {
-    // TODO: proper response builder + staleness checker
-    let rsp = match req {
-        Request::Ping => Bytes::from_static(b"+PONG\r\n"),
-        Request::Echo { msg } => str_response(&msg),
-        Request::Get { key } => db
-            .scalar_get(&key)
-            .await
-            .map(|r| match r {
-                Some(b) => str_response(&b),
-                None => Bytes::from_static(RSP_NUL_STR),
-            })
-            .unwrap_or_else(|e| e.as_resp_bytes()),
-        // Request::Get { key } => match db.scalar_get(&key).await? {
-        //     Some(b) => str_response(&b),
-        //     None => Bytes::from_static(RSP_NUL_STR),
-        // },
+async fn handle_req(
+    rsp: &mut BufferBuilder,
+    req: Request,
+    db: Arc<Keyspace>,
+) -> Result<(), KeyError> {
+    // TODO: staleness checker
+    match req {
+        Request::Ping => rsp.pong(),
+        Request::Echo { msg } => rsp.str_bulk(msg.as_ref()),
+        Request::Get { key } => match db.scalar_get(&key).await? {
+            Some(b) => rsp.str_bulk(b.as_ref()),
+            None => rsp.null_bulk_str(),
+        },
         Request::Set { key, val, ttl } => {
             let ttl = ttl.map(|v| v.as_unix()).transpose()?;
-            db.scalar_set(&key, &val, ttl)
-                .await
-                .map(|_| Bytes::from_static(RSP_OK))
-                .unwrap_or_else(|e| e.as_resp_bytes())
-            // Bytes::from_static(RSP_OK)
+            db.scalar_set(&key, &val, ttl).await?;
+            rsp.ok()
         }
-        Request::Rpush { key, values } => db
-            .list_push(&key, values)
-            .await
-            .map(|n| Bytes::from(format!(":{n}\r\n")))
-            .unwrap_or_else(|e| e.as_resp_bytes()),
+        Request::Rpush { key, values } => {
+            let n = db.list_push(&key, values).await?;
+            rsp.integer(n)
+        }
     };
 
-    s.write_all(&rsp).await?;
     Ok(())
-}
-
-async fn dump_err<E: fmt::Display>(s: &mut TcpStream, err: E) {
-    // TODO: make this in proper way
-    let msg = err.to_string().replace('\r', "\\r").replace('\n', "\\n");
-    if let Err(err) = s.write_all(format!("-ERR {msg}\r\n").as_bytes()).await {
-        println!("Err: can't write response: {err:?}");
-    }
 }
 
 async fn read_request(

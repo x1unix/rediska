@@ -17,6 +17,13 @@ pub enum KeyError {
 }
 
 impl KeyError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            KeyError::WrongType => "WRONGTYPE",
+            _ => "ERR",
+        }
+    }
+
     pub fn as_resp_bytes(&self) -> Bytes {
         match self {
             KeyError::WrongType => Bytes::from_static(
