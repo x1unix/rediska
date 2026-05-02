@@ -302,7 +302,7 @@ pub enum Request {
     },
     Lpop {
         key: Bytes,
-        n: usize,
+        n: Option<usize>,
     },
     // TODO: add another commands
 }
@@ -388,13 +388,9 @@ impl Request {
     fn new_lpop(args: &[Value]) -> Result<Self, RequestError> {
         let mut r = ArgReader::new("LPOP", args);
         let key = r.str()?;
-        r.maybe_next::<usize>().and_then(|n| {
-            let n = n.unwrap_or(1);
-            if n > 0 {
-                Ok(Self::Lpop { key, n })
-            } else {
-                Err(RequestError::OutOfRange)
-            }
+        r.maybe_next::<usize>().and_then(|n| match n {
+            Some(n) if n == 0 => Err(RequestError::OutOfRange),
+            n => Ok(Self::Lpop { key, n }),
         })
     }
 }

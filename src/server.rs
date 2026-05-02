@@ -122,15 +122,27 @@ async fn handle_req(
             }
         }
         Request::Lpop { key, n } => {
-            let out = db.list_pop(&key, PopOrder::Start(n)).await?;
+            let order = PopOrder::Start(n.unwrap_or(1));
+            let out = db.list_pop(&key, order).await?.filter(|v| !v.is_empty());
 
-            if let Some(parts) = out {
-                rsp.array(parts.len());
-                parts.iter().for_each(|e| {
-                    rsp.str_bulk(e.as_ref());
-                });
-            } else {
-                rsp.array(0);
+            // Client should return array only if count was specified.
+            match out {
+                Some(parts) if n.is_none() => {
+                    rsp.str_bulk(parts[0].as_ref());
+                }
+                Some(parts) => {
+                    rsp.array(parts.len());
+                    parts.iter().for_each(|e| {
+                        rsp.str_bulk(e.as_ref());
+                    });
+                }
+                None => {
+                    if n.is_none() {
+                        rsp.null_bulk_str();
+                    } else {
+                        rsp.array(0);
+                    }
+                }
             }
         }
     };
