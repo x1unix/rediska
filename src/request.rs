@@ -90,6 +90,32 @@ impl<'a> ArgReader<'a> {
         }
     }
 
+    fn next<T>(&mut self) -> Result<T, RequestError>
+    where
+        T: TryFrom<&'a Value, Error = ValueTypeError>,
+    {
+        let x = self
+            .args
+            .first()
+            .map(|v| T::try_from(v))
+            .transpose()
+            .map_err(|e| RequestError::InvalidArgumentType {
+                pos: self.offset,
+                err: e,
+            })?;
+
+        if let Some(x) = x {
+            self.advance(1);
+            Ok(x)
+        } else {
+            Err(RequestError::InvalidArgsCount {
+                want: self.offset + 1,
+                got: self.offset,
+                cmd: self.cmd,
+            })
+        }
+    }
+
     fn kv(&mut self) -> Result<(Bytes, Bytes), RequestError> {
         if self.args.len() < 2 {
             return Err(RequestError::InvalidArgsCount {
@@ -196,12 +222,12 @@ impl<'a> ArgReader<'a> {
     }
 }
 
-pub enum TTL {
+pub enum Ttl {
     Duration(Duration),
     Timestamp(Duration),
 }
 
-impl TryInto<Duration> for TTL {
+impl TryInto<Duration> for Ttl {
     type Error = SystemTimeError;
 
     fn try_into(self) -> Result<Duration, Self::Error> {
@@ -209,14 +235,14 @@ impl TryInto<Duration> for TTL {
     }
 }
 
-impl TTL {
+impl Ttl {
     /// Returns Unix timestamp duration from TTL value based on current system time.
     pub fn as_unix(&self) -> Result<Duration, SystemTimeError> {
         match self {
-            TTL::Duration(dur) => SystemTime::now()
+            Ttl::Duration(dur) => SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|now| now + dur.to_owned()),
-            TTL::Timestamp(ts) => Ok(ts.to_owned()),
+            Ttl::Timestamp(ts) => Ok(ts.to_owned()),
         }
     }
 }
@@ -232,13 +258,17 @@ pub enum Request {
     Set {
         key: Bytes,
         val: Bytes,
-        ttl: Option<TTL>,
+        ttl: Option<Ttl>,
     },
     Rpush {
         key: Bytes,
         values: Vec<Bytes>,
     },
-    // TODO: add another commands
+    Lrange {
+        key: Bytes,
+        start: i32,
+        end: i32,
+    }, // TODO: add another commands
 }
 
 impl Request {
@@ -264,15 +294,15 @@ impl Request {
 
         // TODO: this logic is brittle and relies on args ordering.
         let ttl = if let Some(v) = r.get_opt_u64(b"EX")? {
-            Some(TTL::Duration(Duration::from_secs(v)))
+            Some(Ttl::Duration(Duration::from_secs(v)))
         } else if let Some(v) = r.get_opt_u64(b"PX")? {
-            Some(TTL::Duration(Duration::from_millis(v)))
+            Some(Ttl::Duration(Duration::from_millis(v)))
         } else if let Some(v) = r.get_opt_u64(b"EXAT")? {
-            Some(TTL::Timestamp(Duration::from_secs(v)))
+            Some(Ttl::Timestamp(Duration::from_secs(v)))
         } else {
             // Clippy warns about manual_map unless I do this:
             r.get_opt_u64(b"PXAT")?
-                .map(|v| TTL::Timestamp(Duration::from_millis(v)))
+                .map(|v| Ttl::Timestamp(Duration::from_millis(v)))
         };
 
         // TODO: support NX, XX, IFEQ, IFDEQ, etc options.
@@ -293,6 +323,15 @@ impl Request {
         let key = r.str()?;
         let values = r.collect_strs()?;
         Ok(Self::Rpush { key, values })
+    }
+
+    fn new_lrange(args: &[Value]) -> Result<Self, RequestError> {
+        let mut r = ArgReader::new("RPUSH", args);
+        let key = r.str()?;
+        let start = r.next::<i32>()?;
+        let end = r.next::<i32>()?;
+
+        Ok(Self::Lrange { key, start, end })
     }
 }
 
@@ -328,6 +367,7 @@ impl TryFrom<Value> for Request {
             cmd if cmd.eq_ignore_ascii_case(b"GET") => Self::new_get(args),
             cmd if cmd.eq_ignore_ascii_case(b"SET") => Self::new_set(args),
             cmd if cmd.eq_ignore_ascii_case(b"RPUSH") => Self::new_rpush(args),
+            cmd if cmd.eq_ignore_ascii_case(b"LRANGE") => Self::new_lrange(args),
             _ => Err(RequestError::UnknownCommand(cmd.to_owned())),
         }
     }

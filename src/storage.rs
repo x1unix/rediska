@@ -143,6 +143,62 @@ impl Keyspace {
             }
         }
     }
+
+    pub async fn list_range(
+        &self,
+        key: &Bytes,
+        start: i32,
+        end: i32,
+    ) -> Result<Option<Vec<Bytes>>, KeyError> {
+        let now = get_now()?;
+        let db = self.db.lock().await;
+        let e = db
+            .get(key)
+            .filter(|v| v.ttl_is_before(now))
+            .map(|e| &e.value);
+
+        match e {
+            Some(Value::List(l)) => {
+                // TODO
+                if let Some((start, end)) = convert_range(start, end, l.len()) {
+                    // TODO: RefCell?
+                    let r = &l[start..=end];
+                    Ok(Some(r.to_vec()))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(_) => Err(KeyError::WrongType),
+            None => Ok(None),
+        }
+    }
+}
+
+fn convert_range(start: i32, end: i32, len: usize) -> Option<(usize, usize)> {
+    if len == 0 {
+        return None;
+    }
+
+    let start = index_from_pos(start, len);
+    let end = index_from_pos(end, len);
+    if start > end {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+fn index_from_pos(pos: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    };
+
+    let ilen = len as i32;
+    let last_idx = ilen - 1;
+
+    let i = if pos < 0 { ilen + pos } else { pos };
+
+    i.clamp(0, last_idx) as usize
 }
 
 fn get_now() -> Result<Duration, KeyError> {

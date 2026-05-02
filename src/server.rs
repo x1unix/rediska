@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use crate::reader::{ReadError, StreamParser};
-use crate::request::{Request, RequestError, TTL};
+use crate::request::{Request, RequestError, Ttl};
 use crate::response::BufferBuilder;
 use crate::storage::{Entry, KeyError, Keyspace, MemDB, Value};
 
@@ -51,7 +51,9 @@ pub async fn handle_conn(
                     println!("Err: {err:?}");
                 }
 
-                s.write_all(rsp.build().as_ref()).await?;
+                let body = rsp.build();
+                // println!("Resp: {body:?}");
+                s.write_all(body.as_ref()).await?;
             }
             Ok(None) => break,
             Err(RequestError::ReadError(ReadError::Io(err))) => {
@@ -77,20 +79,39 @@ async fn handle_req(
 ) -> Result<(), KeyError> {
     // TODO: staleness checker
     match req {
-        Request::Ping => rsp.pong(),
-        Request::Echo { msg } => rsp.str_bulk(msg.as_ref()),
+        Request::Ping => {
+            rsp.pong();
+        }
+        Request::Echo { msg } => {
+            rsp.str_bulk(msg.as_ref());
+        }
         Request::Get { key } => match db.scalar_get(&key).await? {
-            Some(b) => rsp.str_bulk(b.as_ref()),
-            None => rsp.null_bulk_str(),
+            Some(b) => {
+                rsp.str_bulk(b.as_ref());
+            }
+            None => {
+                rsp.null_bulk_str();
+            }
         },
         Request::Set { key, val, ttl } => {
             let ttl = ttl.map(|v| v.as_unix()).transpose()?;
             db.scalar_set(&key, &val, ttl).await?;
-            rsp.ok()
+            rsp.ok();
         }
         Request::Rpush { key, values } => {
             let n = db.list_push(&key, values).await?;
-            rsp.integer(n)
+            rsp.integer(n);
+        }
+        Request::Lrange { key, start, end } => {
+            let parts = db.list_range(&key, start, end).await?;
+            if let Some(parts) = parts {
+                rsp.array(parts.len());
+                parts.iter().for_each(|e| {
+                    rsp.str_bulk(e.as_ref());
+                });
+            } else {
+                rsp.array(0);
+            }
         }
     };
 
