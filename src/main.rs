@@ -2,11 +2,12 @@
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 
-pub mod assembler;
-pub mod parser;
-pub mod reader;
-pub mod request;
-pub mod server;
+mod assembler;
+mod parser;
+mod reader;
+mod request;
+mod response;
+mod server;
 mod storage;
 
 const ADDR: &str = "127.0.0.1:6379";
