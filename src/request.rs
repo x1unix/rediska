@@ -37,6 +37,9 @@ pub enum RequestError {
         cmd: &'static str,
     },
 
+    #[error("value is out of range, must be positive")]
+    OutOfRange,
+
     #[error("missing key")]
     MissingKey { cmd: &'static str },
 
@@ -275,7 +278,12 @@ pub enum Request {
     },
     Llen {
         key: Bytes,
-    }, // TODO: add another commands
+    },
+    Lpop {
+        key: Bytes,
+        n: usize,
+    },
+    // TODO: add another commands
 }
 
 impl Request {
@@ -348,12 +356,24 @@ impl Request {
     }
 
     fn new_lrange(args: &[Value]) -> Result<Self, RequestError> {
-        let mut r = ArgReader::new("RPUSH", args);
+        let mut r = ArgReader::new("LRANGE", args);
         let key = r.str()?;
         let start = r.next::<i32>()?;
         let end = r.next::<i32>()?;
 
         Ok(Self::Lrange { key, start, end })
+    }
+
+    fn new_lpop(args: &[Value]) -> Result<Self, RequestError> {
+        let mut r = ArgReader::new("LPOP", args);
+        let key = r.str()?;
+        r.next::<usize>().and_then(|n| {
+            if n > 0 {
+                Ok(Self::Lpop { key, n })
+            } else {
+                Err(RequestError::OutOfRange)
+            }
+        })
     }
 }
 
@@ -392,6 +412,7 @@ impl TryFrom<Value> for Request {
             cmd if cmd.eq_ignore_ascii_case(b"RPUSH") => Self::new_rpush(args),
             cmd if cmd.eq_ignore_ascii_case(b"LPUSH") => Self::new_lpush(args),
             cmd if cmd.eq_ignore_ascii_case(b"LRANGE") => Self::new_lrange(args),
+            cmd if cmd.eq_ignore_ascii_case(b"LPOP") => Self::new_lpop(args),
             _ => Err(RequestError::UnknownCommand(cmd.to_owned())),
         }
     }

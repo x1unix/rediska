@@ -82,6 +82,26 @@ impl InsertOrder {
     }
 }
 
+pub enum PopOrder {
+    Start(usize),
+    End(usize),
+}
+
+impl PopOrder {
+    fn apply(self, dst: &mut Vec<Bytes>) -> Vec<Bytes> {
+        match self {
+            Self::Start(n) => {
+                let n = n.clamp(0, dst.len());
+                dst.drain(0..n).collect()
+            }
+            Self::End(n) => {
+                let n = n.clamp(0, dst.len());
+                dst.split_off(n)
+            }
+        }
+    }
+}
+
 pub struct Keyspace {
     db: Mutex<MemDB>,
 }
@@ -124,6 +144,31 @@ impl Keyspace {
 
         db.set(key, Entry::new_string(val, expire_at));
         Ok(())
+    }
+
+    pub async fn list_pop(
+        &self,
+        key: &Bytes,
+        order: PopOrder,
+    ) -> Result<Option<Vec<Bytes>>, KeyError> {
+        let now = get_now()?;
+        let mut db = self.db.lock().await;
+        match db.entry(key) {
+            HashEntry::Occupied(mut slot) => {
+                if slot.get().ttl_is_before(now) {
+                    match &mut slot.get_mut().value {
+                        Value::List(arr) => {
+                            let out = order.apply(arr);
+                            Ok(Some(out))
+                        }
+                        _ => Err(KeyError::WrongType),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     pub async fn list_insert(

@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::reader::{ReadError, StreamParser};
 use crate::request::{Request, RequestError, Ttl};
 use crate::response::BufferBuilder;
-use crate::storage::{Entry, InsertOrder, KeyError, Keyspace, MemDB, Value};
+use crate::storage::{Entry, InsertOrder, KeyError, Keyspace, MemDB, PopOrder, Value};
 
 /// Starts Redis listener on a given address.
 pub async fn listen(addr: &str) -> Result<(), io::Error> {
@@ -113,6 +113,18 @@ async fn handle_req(
         Request::Lrange { key, start, end } => {
             let parts = db.list_range(&key, start, end).await?;
             if let Some(parts) = parts {
+                rsp.array(parts.len());
+                parts.iter().for_each(|e| {
+                    rsp.str_bulk(e.as_ref());
+                });
+            } else {
+                rsp.array(0);
+            }
+        }
+        Request::Lpop { key, n } => {
+            let out = db.list_pop(&key, PopOrder::Start(n)).await?;
+
+            if let Some(parts) = out {
                 rsp.array(parts.len());
                 parts.iter().for_each(|e| {
                     rsp.str_bulk(e.as_ref());

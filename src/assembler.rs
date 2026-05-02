@@ -43,6 +43,8 @@ impl<'a> TryFrom<&'a Value> for &'a Bytes {
     }
 }
 
+// TODO: number parsing into macro
+
 impl TryFrom<&Value> for i32 {
     type Error = ValueTypeError;
 
@@ -50,6 +52,19 @@ impl TryFrom<&Value> for i32 {
         if let Value::String(val) = value {
             let s = std::str::from_utf8(val.as_ref())?;
             Ok(s.parse::<i32>()?)
+        } else {
+            Err(ValueTypeError::NotAScalar)
+        }
+    }
+}
+
+impl TryFrom<&Value> for usize {
+    type Error = ValueTypeError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        if let Value::String(val) = value {
+            let s = std::str::from_utf8(val.as_ref())?;
+            Ok(s.parse::<usize>()?)
         } else {
             Err(ValueTypeError::NotAScalar)
         }
