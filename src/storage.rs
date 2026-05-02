@@ -23,17 +23,6 @@ impl KeyError {
             _ => "ERR",
         }
     }
-
-    pub fn as_resp_bytes(&self) -> Bytes {
-        match self {
-            KeyError::WrongType => Bytes::from_static(
-                b"-WRONGTYPE operation against a key holding the wrong kind of value\r\n",
-            ),
-            KeyError::SystemTimeError(err) => {
-                Bytes::from(format!("-ERR system time error: {err}\r\n"))
-            }
-        }
-    }
 }
 
 /// Describes value stored in DB.
@@ -69,6 +58,26 @@ impl Entry {
         match self.expire_at {
             Some(ttl) => ttl > now,
             None => true,
+        }
+    }
+}
+
+pub enum InsertOrder {
+    Append,
+    Prepend,
+}
+
+impl InsertOrder {
+    fn apply_list(self, dst: &mut Vec<Bytes>, src: Vec<Bytes>) {
+        match self {
+            Self::Append => {
+                dst.extend(src);
+            }
+            Self::Prepend => {
+                for e in src {
+                    dst.insert(0, e);
+                }
+            }
         }
     }
 }
@@ -117,7 +126,12 @@ impl Keyspace {
         Ok(())
     }
 
-    pub async fn list_push(&self, key: &Bytes, entries: Vec<Bytes>) -> Result<usize, KeyError> {
+    pub async fn list_insert(
+        &self,
+        key: &Bytes,
+        entries: Vec<Bytes>,
+        order: InsertOrder,
+    ) -> Result<usize, KeyError> {
         let now = get_now()?;
         let mut db = self.db.lock().await;
         match db.entry(key) {
@@ -125,7 +139,8 @@ impl Keyspace {
                 if slot.get().ttl_is_before(now) {
                     match &mut slot.get_mut().value {
                         Value::List(arr) => {
-                            arr.extend(entries);
+                            order.apply_list(arr, entries);
+                            // arr.extend(entries);
                             Ok(arr.len())
                         }
                         _ => Err(KeyError::WrongType),
@@ -206,6 +221,8 @@ fn get_now() -> Result<Duration, KeyError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.into())
 }
+
+// TODO: separate key types into separate shards.
 
 pub struct MemDB {
     kv: HashMap<Bytes, Entry>,

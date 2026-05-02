@@ -264,6 +264,10 @@ pub enum Request {
         key: Bytes,
         values: Vec<Bytes>,
     },
+    Lpush {
+        key: Bytes,
+        values: Vec<Bytes>,
+    },
     Lrange {
         key: Bytes,
         start: i32,
@@ -318,6 +322,13 @@ impl Request {
         Ok(Self::Get { key })
     }
 
+    fn new_lpush(args: &[Value]) -> Result<Self, RequestError> {
+        let mut r = ArgReader::new("LPUSH", args);
+        let key = r.str()?;
+        let values = r.collect_strs()?;
+        Ok(Self::Lpush { key, values })
+    }
+
     fn new_rpush(args: &[Value]) -> Result<Self, RequestError> {
         let mut r = ArgReader::new("RPUSH", args);
         let key = r.str()?;
@@ -367,6 +378,7 @@ impl TryFrom<Value> for Request {
             cmd if cmd.eq_ignore_ascii_case(b"GET") => Self::new_get(args),
             cmd if cmd.eq_ignore_ascii_case(b"SET") => Self::new_set(args),
             cmd if cmd.eq_ignore_ascii_case(b"RPUSH") => Self::new_rpush(args),
+            cmd if cmd.eq_ignore_ascii_case(b"LPUSH") => Self::new_lpush(args),
             cmd if cmd.eq_ignore_ascii_case(b"LRANGE") => Self::new_lrange(args),
             _ => Err(RequestError::UnknownCommand(cmd.to_owned())),
         }
