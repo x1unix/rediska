@@ -272,6 +272,9 @@ pub enum Request {
         key: Bytes,
         start: i32,
         end: i32,
+    },
+    Llen {
+        key: Bytes,
     }, // TODO: add another commands
 }
 
@@ -320,6 +323,14 @@ impl Request {
         r.assert_empty()?;
 
         Ok(Self::Get { key })
+    }
+
+    fn new_llen(args: &[Value]) -> Result<Self, RequestError> {
+        let mut r = ArgReader::new("LLEN", args);
+        let key = r.str()?;
+        r.assert_empty()?;
+
+        Ok(Self::Llen { key })
     }
 
     fn new_lpush(args: &[Value]) -> Result<Self, RequestError> {
@@ -377,6 +388,7 @@ impl TryFrom<Value> for Request {
             cmd if cmd.eq_ignore_ascii_case(b"ECHO") => Self::new_echo(args),
             cmd if cmd.eq_ignore_ascii_case(b"GET") => Self::new_get(args),
             cmd if cmd.eq_ignore_ascii_case(b"SET") => Self::new_set(args),
+            cmd if cmd.eq_ignore_ascii_case(b"LLEN") => Self::new_llen(args),
             cmd if cmd.eq_ignore_ascii_case(b"RPUSH") => Self::new_rpush(args),
             cmd if cmd.eq_ignore_ascii_case(b"LPUSH") => Self::new_lpush(args),
             cmd if cmd.eq_ignore_ascii_case(b"LRANGE") => Self::new_lrange(args),

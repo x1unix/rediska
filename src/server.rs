@@ -98,6 +98,10 @@ async fn handle_req(
             db.scalar_set(&key, &val, ttl).await?;
             rsp.ok();
         }
+        Request::Llen { key } => {
+            let n = db.list_len(&key).await?.unwrap_or(0);
+            rsp.integer(n);
+        }
         Request::Rpush { key, values } => {
             let n = db.list_insert(&key, values, InsertOrder::Append).await?;
             rsp.integer(n);

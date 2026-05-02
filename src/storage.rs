@@ -187,6 +187,21 @@ impl Keyspace {
             None => Ok(None),
         }
     }
+
+    pub async fn list_len(&self, key: &Bytes) -> Result<Option<usize>, KeyError> {
+        let now = get_now()?;
+        let db = self.db.lock().await;
+        db.get(key)
+            .filter(|v| v.ttl_is_before(now))
+            .map(|e| {
+                if let Value::List(l) = &e.value {
+                    Ok(l.len())
+                } else {
+                    Err(KeyError::WrongType)
+                }
+            })
+            .transpose()
+    }
 }
 
 fn convert_range(start: i32, end: i32, len: usize) -> Option<(usize, usize)> {
