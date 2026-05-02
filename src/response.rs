@@ -38,7 +38,7 @@ impl BufferBuilder {
     }
 
     pub fn pong(&mut self) {
-        self.buf.extend_from_slice(b"+OK\r\n");
+        self.buf.extend_from_slice(b"+PONG\r\n");
     }
 
     pub fn null_bulk_str(&mut self) {
